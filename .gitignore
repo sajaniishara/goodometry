@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+.coverage
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Claude Code session state
+.claude/
+
+# Cloned external repos (DPVO, DROID-SLAM, unitree_ros). Reproduced via setup script.
+third_party/
+
+# Model checkpoints + per-run logs/metrics
+runs/
+
+# Process / preprocessing stdout logs
+logs/
+
+# Pilot smoke-test binaries (saved npz outputs). Scripts are kept.
+pilot/*.npz
+
+# Empty placeholder
+outputs/
+
+# Anything else you don't want in the repo
+*.pt
+*.pth
+*.h5

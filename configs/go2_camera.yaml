@@ -1,0 +1,24 @@
+# Go2 Isaac Sim stereo camera parameters.
+# Source: go2_research/go2_research_system.py `add_stereo_cameras`, Session 4 FOV verification.
+camera:
+  width: 1280
+  height: 720
+  fx: 914.0
+  fy: 914.0
+  cx: 640.0
+  cy: 360.0
+  fps: 30
+  h_fov_deg: 70.0
+  v_fov_deg: 43.0
+  focal_length_mm: 1.5
+  horizontal_aperture_mm: 2.1
+
+stereo:
+  baseline_m: 0.120
+  left_prim: /World/Go2/base/CameraLeft
+  right_prim: /World/Go2/base/CameraRight
+
+frame_convention:
+  isaac_sim: "+X forward, +Y left, +Z up (camera local frame, no rotation applied)"
+  opencv:    "+Z forward, +X right, +Y down"
+  note: "VO tools expect OpenCV convention; convert estimated poses back to Isaac frame for GT comparison."
