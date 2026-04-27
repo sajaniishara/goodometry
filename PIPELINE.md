@@ -2,7 +2,7 @@
 
 **Project**: `~/projects/goodometry/`
 **Data**: `/mnt/data/go2_research_dataset_v2/` (1,008 clean trajectories, 1,081 collected, 73 falls excluded)
-**Status as of 2026-04-25**: Three of four preprocessing arms complete; both fusion models (`fusion_v1` and `fusion_v1_marg`) trained, evaluated, and head-to-head'd against the Stage-2 RGB CNN baseline; VO arm still being computed by DROID-SLAM at-scale (~22 % done).
+**Status as of 2026-04-26**: Three of four preprocessing arms complete; both fusion models (`fusion_v1` and `fusion_v1_marg`) trained, evaluated, and head-to-head'd against the Stage-2 RGB CNN baseline. VO arm restarted at stride=3 (Session 23) after empirical validation — ~2.4 days remaining for the full 1,008 trajectories. RAFT-Stereo disparity precompute also resumed at iters=32 on GPU 1 (~5 days remaining) for the existing v2 disparity-input experiments.
 
 ---
 
@@ -161,9 +161,9 @@ yaw   vs GT:  drifts (no ext reference)
                                         not filter error
 ```
 
-### 3.3 Camera → `vo.npz` (DROID-SLAM stereo) 🔄 ~218 / 1,008 (in progress on GPU 0)
+### 3.3 Camera → `vo.npz` (DROID-SLAM stereo) 🔄 in progress on GPU 0
 
-**Pipeline.** DROID-SLAM in stereo mode, fed left+right at 360×640 (resized from 1280×720). Per-frame SE(3) camera-to-world pose + a `valid` flag per timestep.
+**Pipeline.** DROID-SLAM in stereo mode, fed left+right at 360×640 (decoded at half-res from 1280×720 PNG via `cv2.IMREAD_REDUCED_COLOR_2`). Per-frame SE(3) camera-to-world pose + a `valid` flag per timestep. Skipped frames (stride=3) are SLERP-interpolated to fill the full `sensors.npz['frame_idx']` coverage.
 
 **Pilot (2 trajectories, before user-directed scale-up):**
 
@@ -177,9 +177,26 @@ forest / forward        DROID stereo  0.14 m   0.131 m   1.13   9.3   ← winner
 
 DROID won on forest (target deployment terrain) by 2.5× ATE; DPVO won on low-texture flat ground. Forest = the dominant terrain in the v2 dataset (per Session 11 of the original CHANGES), so DROID was selected.
 
+**Optimisations (Session 23 stride sweep + I/O):**
+
+- **`stride=3`** with SLERP interpolation. Empirically validated against stride 1, 4, 5, 8 on 3 pilot trajectories — stride=3 gives the best weighted-average ATE across the dataset's terrain mix, while being 2.5× faster than stride=1. See `EXPERIMENTS.md` §7 for the full sweep results.
+- **`fast=True`** — skip both `backend(7)` and `backend(12)` global BA passes. Trajectories are 1–2 minutes with no revisits, so frontend's local-window BA + `traj_filler` is enough.
+- **Parallel I/O + `IMREAD_REDUCED_COLOR_2`** — drops PNG load+decode time from 60 s → 9 s per 3,500-frame trajectory.
+
+**Combined wall-clock**: ~3.4 min/trajectory, ~17 fps effective. Total projected: **~2.4 days** for the full 1,008 trajectories (down from the original ~7 days).
+
 **Failures.** ~1 % of trajectories hit a keyframe-buffer overflow in DROID's frontend (`IndexError: index 512 is out of bounds for dimension 0 with size 512`). They're logged as `status: error` in `logs/vo_scale_droid.jsonl`; will be re-run with `--buffer 2048` at the end.
 
-**Estimated total wall-clock**: ~7 days at 10–11 min/trajectory single-GPU.
+**Output schema** (`<traj>/vo.npz`):
+
+```
+frame_idx        (N,)        int32     # matches sensors.npz exactly (full coverage via interp)
+pose_7d          (N, 7)      float32   # [tx, ty, tz, qx, qy, qz, qw] cam→world
+pose_mat         (N, 4, 4)   float32   # SE(3) matrix form
+valid            (N,)        bool
+stride_used      (scalar)    int32     # diagnostic — 3 in current config
+n_droid_frames   (scalar)    int32     # how many DROID actually processed (vs interpolated)
+```
 
 ### 3.4 Body-frame labels → `labels_body.npz` ✅ 1,008 / 1,008 (small, sub-second per file)
 
@@ -478,14 +495,15 @@ python fusion/evaluate.py --run-dir runs/fusion_v1_marg --device cuda
 
 ## 9. Open issues and next steps
 
-1. **VO arm at scale.** DROID-SLAM has finished ~218 / 1,008 trajectories (PID 108092 on GPU 0, detached). ETA ~5–6 more days. ~1 % of trajectories hit a 512-keyframe buffer overflow — re-run those with `--buffer 2048` once the main run completes.
-2. **fusion_v2 (kin + ins + vo).** Adds one modality token to `FusionTransformer`, otherwise identical training. Run when DROID's vo.npz coverage is high enough (could start at ~80 % coverage with held-out trajectories sampled from the completed set). Expected to close the `vx`/`vz` gap where visual ego-motion helps most.
-3. **Disparity precompute is parked.** User explicitly asked to set this aside; resume with `precompute_disparity_h5.py --traj-start 504 --traj-end 1008` whenever needed.
-4. **FR_calf root-cause.** Current per-trajectory offset masks the issue but doesn't fix it. If the project ever recollects the v2 dataset, investigating the Isaac Sim Go2 USD's FR_calf collision/foot mesh is worthwhile.
-5. **Sim-to-real for the magnetometer.** Sim mag is hardcoded `[23, 2, -42]` μT (mid-latitude S-hemisphere reference). The MARG ablation showed it buys ~10 % on test in pure-sim, but real Go2 deployment requires WMM/IGRF for the actual lat/lon plus per-unit hard-iron / soft-iron calibration. See §3.2.
-6. **Per-axis residuals.** `ωx` (roll rate) is the worst axis at 0.14–0.16 rad/s — mostly the body-rocking gait that VO and IMU smooth through. Leg kinematics could in principle constrain it (foot impact timing). Worth investigating once VO data is in.
-7. **Modality-dropout ablation.** Forced each modality off at *training*; never measured what happens when modalities are dropped at *inference*. The fusion-net's whole sales pitch is graceful degradation — should quantify it.
-8. **Stratified split alignment.** The two `split_trajectories` implementations (`go2_research/cnn3d/dataset.py` and `goodometry/fusion/dataset.py`) use different RNG types so even with the same seed they produce different orderings. Future-Session-23 cleanup item: unify them so head-to-head comparisons don't require the 71-trajectory clean-subset workaround.
+1. **VO arm at scale.** DROID-SLAM at stride=3 (PID 169781, GPU 0, detached). ETA ~2.4 days for the remaining ~1,003 trajectories.
+2. **RAFT-Stereo disparity at scale.** Precompute resumed at iters=32 (PID 157759, GPU 1, detached). ETA ~5 days for the remaining ~482 trajectories. For the existing v2 CNN/MViT disparity-input experiments — distinct from the goodometry pipeline.
+3. **fusion_v2 (kin + ins + vo).** Adds one modality token to `FusionTransformer`, otherwise identical training. Run when DROID's vo.npz coverage is high enough (could start at ~80 % coverage with held-out trajectories sampled from the completed set). Expected to close the `vx`/`vz` gap where visual ego-motion helps most.
+4. **DROID buffer-overflow re-runs.** ~1 % of trajectories hit `IndexError: index 512 is out of bounds for dimension 0 with size 512` (long forest trajectories with many keyframes). Re-run those with `buffer=1024` after the main pass.
+5. **FR_calf root-cause.** Current per-trajectory offset masks the issue but doesn't fix it. If the project ever recollects the v2 dataset, investigating the Isaac Sim Go2 USD's FR_calf collision/foot mesh is worthwhile.
+6. **Sim-to-real for the magnetometer.** Sim mag is hardcoded `[23, 2, -42]` μT (mid-latitude S-hemisphere reference). The MARG ablation showed it buys ~10 % on test in pure-sim, but real Go2 deployment requires WMM/IGRF for the actual lat/lon plus per-unit hard-iron / soft-iron calibration. See §3.2.
+7. **Per-axis residuals.** `ωx` (roll rate) is the worst axis at 0.14–0.16 rad/s — mostly the body-rocking gait that VO and IMU smooth through. Leg kinematics could in principle constrain it (foot impact timing). Worth investigating once VO data is in.
+8. **Modality-dropout ablation.** Forced each modality off at *training*; never measured what happens when modalities are dropped at *inference*. The fusion-net's whole sales pitch is graceful degradation — should quantify it.
+9. **Stratified split alignment.** The two `split_trajectories` implementations (`go2_research/cnn3d/dataset.py` and `goodometry/fusion/dataset.py`) use different RNG types so even with the same seed they produce different orderings. Future cleanup item: unify them so head-to-head comparisons don't require the 71-trajectory clean-subset workaround.
 
 ---
 

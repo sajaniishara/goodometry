@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, "/home/anyone/projects/goodometry")
-from fusion.dataset import GoFusionDataset, split_trajectories, KINEMATICS_DIM, INS_DIM
+from fusion.dataset import GoFusionDataset, split_trajectories, KINEMATICS_DIM, INS_DIM, VO_DIM
 from fusion.model import FusionTransformer
 
 
@@ -57,6 +57,9 @@ def main():
     kin_norm = (stats["kin_mean"], stats["kin_std"])
     ins_norm = (stats["ins_mean"], stats["ins_std"])
     ins_file = run_args.get("ins_file", "ins.npz")
+    use_vo   = run_args.get("use_vo", False)
+    vo_file  = run_args.get("vo_file", "vo.npz")
+    vo_norm  = (stats["vo_mean"], stats["vo_std"]) if use_vo else None
 
     test_ds = GoFusionDataset(
         test_trajs,
@@ -64,7 +67,10 @@ def main():
         stride=run_args["stride"],
         kin_norm=kin_norm,
         ins_norm=ins_norm,
+        vo_norm=vo_norm,
         ins_file=ins_file,
+        vo_file=vo_file,
+        use_vo=use_vo,
     )
     print(f"test clips: {len(test_ds):,}", flush=True)
 
@@ -74,6 +80,7 @@ def main():
 
     model = FusionTransformer(
         kin_in=KINEMATICS_DIM, ins_in=INS_DIM,
+        vo_in=VO_DIM if use_vo else None,
         d_model=run_args["d_model"], n_blocks=run_args["n_blocks"],
         n_heads=run_args["n_heads"], ffn_dim=run_args["ffn_dim"],
         clip_len=run_args["clip_len"],
@@ -90,7 +97,8 @@ def main():
             kin = batch["kin"].to(device, non_blocking=True)
             ins = batch["ins"].to(device, non_blocking=True)
             y   = batch["label"].to(device, non_blocking=True)
-            p = model(kin, ins)
+            vo  = batch["vo"].to(device, non_blocking=True) if use_vo else None
+            p = model(kin, ins, vo=vo)
             preds.append(p.cpu()); tgts.append(y.cpu())
     preds = torch.cat(preds, dim=0).numpy()
     tgts  = torch.cat(tgts,  dim=0).numpy()

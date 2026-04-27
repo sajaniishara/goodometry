@@ -1,15 +1,18 @@
 """Factorized modal-then-temporal causal transformer for Go2 state estimation.
 
-Per `go2-concrete-algorithms.md` §5.2. Two modality tokens per timestep
-(kinematics, INS). The 4th and 3rd arms (VO, LiDAR) will slot in later as
-additional tokens — the architecture is agnostic to M.
+Per `go2-concrete-algorithms.md` §5.2. Two or three modality tokens per timestep
+(kinematics, INS, optional VO). Architecture is agnostic to M.
 
-Shapes:
+Shapes (M=2, no VO):
     input: kin (B, T, 31) + ins (B, T, 10)
     project each to 128-D via a 2-layer MLP → per-modality tokens (B, T, 128)
     stack modality tokens:  x (B, T, M=2, 128)
     block: modal self-attn across M, then causal temporal self-attn across T
     head:  mean over M, take last-timestep embedding, linear → 6
+
+Shapes (M=3, with VO):
+    input: kin (B, T, 31) + ins (B, T, 10) + vo (B, T, 7)
+    same flow with x (B, T, M=3, 128)
 
 Output: 6-D body-frame velocity [vx, vy, vz, ωx, ωy, ωz].
 """
@@ -89,6 +92,7 @@ class FusionTransformer(nn.Module):
         self,
         kin_in: int = 31,
         ins_in: int = 10,
+        vo_in:  int | None = None,    # None → M=2 (no VO); set to VO_DIM=7 for fusion_v2
         d_model: int = 128,
         n_blocks: int = 2,
         n_heads: int = 4,
@@ -99,11 +103,15 @@ class FusionTransformer(nn.Module):
         super().__init__()
         self.clip_len = clip_len
         self.d_model = d_model
+        self.use_vo = vo_in is not None
 
         self.embed_kin = ModalityEmbedder(kin_in, d_model)
         self.embed_ins = ModalityEmbedder(ins_in, d_model)
+        if self.use_vo:
+            self.embed_vo = ModalityEmbedder(vo_in, d_model)
 
-        self.modality_emb = nn.Parameter(torch.zeros(2, d_model))  # [kin, ins]
+        n_modalities = 3 if self.use_vo else 2
+        self.modality_emb = nn.Parameter(torch.zeros(n_modalities, d_model))
         nn.init.normal_(self.modality_emb, std=0.02)
 
         self.blocks = nn.ModuleList([
@@ -115,18 +123,18 @@ class FusionTransformer(nn.Module):
 
     def forward(
         self,
-        kin: torch.Tensor,           # (B, T, kin_in)
-        ins: torch.Tensor,           # (B, T, ins_in)
-        kin_mask: torch.Tensor | None = None,   # (B,) 0/1 per sample — modality dropout at training
+        kin: torch.Tensor,                       # (B, T, kin_in)
+        ins: torch.Tensor,                       # (B, T, ins_in)
+        vo:  torch.Tensor | None = None,         # (B, T, vo_in)  — required when use_vo=True
+        kin_mask: torch.Tensor | None = None,    # (B,) 0/1 — modality dropout at training
         ins_mask: torch.Tensor | None = None,
+        vo_mask:  torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, _ = kin.shape
 
         k = self.embed_kin(kin) + self.modality_emb[0]     # (B, T, D)
         s = self.embed_ins(ins) + self.modality_emb[1]     # (B, T, D)
 
-        # Per-sample modality masking (§6.5). Zeroing pre-block is equivalent to
-        # dropping the token; modal attention will still pass info from the surviving modality.
         if kin_mask is not None:
             k = k * kin_mask.view(B, 1, 1)
         if ins_mask is not None:
@@ -137,8 +145,18 @@ class FusionTransformer(nn.Module):
         k = k + pe
         s = s + pe
 
+        tokens = [k, s]
+
+        if self.use_vo:
+            assert vo is not None, "vo tensor required when model was built with vo_in"
+            v = self.embed_vo(vo) + self.modality_emb[2]   # (B, T, D)
+            if vo_mask is not None:
+                v = v * vo_mask.view(B, 1, 1)
+            v = v + pe
+            tokens.append(v)
+
         # Stack into (B, T, M, D).
-        x = torch.stack([k, s], dim=2)
+        x = torch.stack(tokens, dim=2)
 
         # Causal mask for the temporal attention (T, T).
         causal = torch.triu(torch.ones(T, T, device=kin.device, dtype=torch.bool), diagonal=1)

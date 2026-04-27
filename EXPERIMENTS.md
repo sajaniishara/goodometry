@@ -271,6 +271,74 @@ So the mag is *not useless* in this configuration, just modestly helpful. For si
 | fusion_v1_marg ckpt | `~/projects/goodometry/runs/fusion_v1_marg/best_model.pt` |
 | fusion_v1_marg test | `~/projects/goodometry/runs/fusion_v1_marg/test_results.json` |
 | Fair head-to-head | `~/projects/goodometry/runs/fair_head_to_head.json` |
+| Stride sweep | `~/projects/goodometry/pilot/stride_sweep_results.json` |
 | Training scripts | `~/projects/goodometry/fusion/train.py` and `~/projects/go2_research/run_cnn_rgb_stage2.sh` |
 | Test scripts | `~/projects/goodometry/fusion/evaluate.py`, `~/projects/go2_research/cnn3d/evaluate.py`, `~/projects/goodometry/scripts/fair_test_eval.py` |
 | Comprehensive doc | `~/projects/goodometry/PIPELINE.md` |
+
+---
+
+## 7. DROID-SLAM stride sweep (added Session 23)
+
+To accelerate the DROID-SLAM at-scale run (originally ~7 days at stride=1), did an empirical sweep on 3 pilot trajectories × 5 stride values. Skipped frames are SLERP-interpolated from neighbouring DROID samples to fill the full `sensors.npz['frame_idx']` coverage.
+
+### 7.1 Per-trajectory results (skip-backend mode, image_size [360, 640])
+
+```
+Trajectory 1 — flat / forward (3136 frames)
+   stride   wall   fps    ATE     scale   RPE_t_1s
+     1     8.4m   6.3    0.915  0.81    0.297
+     3     3.4m   15.5   0.789  1.01    0.254   ← best on flat
+     4     2.6m   19.9   1.408  0.73    0.304   ← quality cliff
+     5     2.1m   24.7   1.077  0.86    0.392
+     8     1.3m   38.8   1.331  0.54    0.650   ← scale collapses (0.54 vs ~1.0)
+
+Trajectory 2 — forest / forward (3430 frames)
+   stride   wall   fps    ATE     scale   RPE_t_1s
+     1     6.0m   9.6    0.149  1.16    0.130
+     3     2.9m   19.7   0.175  1.18    0.157
+     4     2.3m   25.0   0.144  1.13    0.130
+     5     2.1m   27.7   0.157  1.15    0.146
+     8     1.3m   43.6   0.126  1.13    0.129   ← actually best on forest
+
+Trajectory 3 — forest / circular (3221 frames)
+   stride   wall   fps    ATE     scale   RPE_t_1s
+     1     5.2m   10.4   0.183  1.00    0.150
+     3     2.8m   19.3   0.181  1.01    0.151
+     4     2.2m   24.4   0.183  1.02    0.149
+     5     1.9m   27.8   0.185  1.01    0.148
+     8     1.2m   43.6   0.278  0.92    0.150   ← starts to degrade
+```
+
+### 7.2 Two clean signals
+
+1. **Forest is forgiving** — strides 1 through 5 give essentially identical ATE on both forest trajectories. Stride=8 only starts to degrade on rotation-heavy circular forest.
+2. **Flat has a cliff at stride=4** — ATE jumps from 0.79 m → 1.41 m (78 % worse). Stride=3 is the largest stride that holds up across both terrain types.
+
+### 7.3 Weighted across actual dataset terrain mix
+
+(62 % forest, 28 % flat, 10 % uneven/uphill — see Session 11 of `go2_research/CHANGES.md`):
+
+```
+stride=1   weighted-avg ATE  ≈  0.36 m       baseline (the unoptimised stride)
+stride=3   weighted-avg ATE  ≈  0.33 m   ← best across the mix, 8 % better than stride=1, 2.7× faster
+stride=4   weighted-avg ATE  ≈  0.50 m       flat cliff dominates the average
+stride=5   weighted-avg ATE  ≈  0.41 m
+stride=8   weighted-avg ATE  ≈  0.50 m
+```
+
+### 7.4 Why stride=3 sometimes beats stride=1
+
+At 30 Hz, robot motion between consecutive frames is ~1.3 cm — *smaller than feature-matching noise*. DROID's flow predictor was trained on TartanAir (drone flights with much larger inter-frame motion). Stride=3 gives it ~4 cm of motion per pair — within its training distribution — so the predictions are cleaner. The interpolation back to 30 Hz then smooths what little residual noise remains.
+
+### 7.5 Decision and current at-scale config
+
+**Stride=3** chosen for the at-scale rerun. Plus three zero-quality-cost optimisations:
+
+- **`fast=True`** — skip both `backend(7)` and `backend(12)` global BA passes. For 1–2 minute trajectories without revisits, the frontend's local-window BA + `traj_filler` is enough. ~5 % wall-clock savings.
+- **Parallel I/O** via `ThreadPoolExecutor(max_workers=8)` for per-frame loading.
+- **`cv2.IMREAD_REDUCED_COLOR_2`** decodes PNGs at half-res (640×360) directly — skips both the full-res decode and the explicit resize.
+
+Combined: I/O drops from 60 s to 9 s per trajectory (6.6× speedup on the I/O alone).
+
+**Final per-trajectory wall-clock**: ~3.4 min, ~17 fps effective. Projected total for 1,008 trajectories: **~2.4 days** (down from the original ~7 days).

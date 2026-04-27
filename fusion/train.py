@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, "/home/anyone/projects/goodometry")
 from fusion.dataset import (
     GoFusionDataset, split_trajectories, compute_norm_stats,
-    KINEMATICS_DIM, INS_DIM, LABEL_DIM,
+    KINEMATICS_DIM, INS_DIM, VO_DIM, LABEL_DIM,
 )
 from fusion.model import FusionTransformer, param_count
 
@@ -59,6 +59,9 @@ def parse_args():
     ap.add_argument("--loss", choices=["mse", "huber"], default="mse")
     ap.add_argument("--ins-file", default="ins.npz",
                     help="ins.npz (IMU-only) or ins_marg.npz (stitched MARG with drift-free yaw)")
+    ap.add_argument("--use-vo", action="store_true", default=False,
+                    help="add VO modality (fusion_v2); requires vo.npz in each trajectory dir")
+    ap.add_argument("--vo-file", default="vo.npz")
     return ap.parse_args()
 
 
@@ -96,18 +99,27 @@ def main():
     print(f"split: train={len(train_trajs)} val={len(val_trajs)} test={len(test_trajs)}", flush=True)
 
     stats = compute_norm_stats(train_trajs, sample_frac=0.2, seed=args.seed,
-                                ins_file=args.ins_file)
+                                ins_file=args.ins_file,
+                                use_vo=args.use_vo, vo_file=args.vo_file)
     np.savez(out / "norm_stats.npz", **stats)
-    print(f"norm stats:  kin|μ|={np.abs(stats['kin_mean']).mean():.3f}  kin|σ|={stats['kin_std'].mean():.3f}"
-          f"  ins|μ|={np.abs(stats['ins_mean']).mean():.3f}  ins|σ|={stats['ins_std'].mean():.3f}",
-          flush=True)
+    msg = (f"norm stats:  kin|μ|={np.abs(stats['kin_mean']).mean():.3f}"
+           f"  kin|σ|={stats['kin_std'].mean():.3f}"
+           f"  ins|μ|={np.abs(stats['ins_mean']).mean():.3f}"
+           f"  ins|σ|={stats['ins_std'].mean():.3f}")
+    if args.use_vo:
+        msg += (f"  vo|μ|={np.abs(stats['vo_mean']).mean():.3f}"
+                f"  vo|σ|={stats['vo_std'].mean():.3f}")
+    print(msg, flush=True)
     kin_norm = (stats['kin_mean'], stats['kin_std'])
     ins_norm = (stats['ins_mean'], stats['ins_std'])
+    vo_norm  = (stats['vo_mean'], stats['vo_std']) if args.use_vo else None
 
     train_ds = GoFusionDataset(train_trajs, args.clip_len, args.stride, kin_norm, ins_norm,
-                                ins_file=args.ins_file)
+                                vo_norm=vo_norm, ins_file=args.ins_file,
+                                vo_file=args.vo_file, use_vo=args.use_vo)
     val_ds   = GoFusionDataset(val_trajs,   args.clip_len, args.stride, kin_norm, ins_norm,
-                                ins_file=args.ins_file)
+                                vo_norm=vo_norm, ins_file=args.ins_file,
+                                vo_file=args.vo_file, use_vo=args.use_vo)
     print(f"clips: train={len(train_ds):,}  val={len(val_ds):,}", flush=True)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -119,6 +131,7 @@ def main():
     # --- model + optimizer ---
     model = FusionTransformer(
         kin_in=KINEMATICS_DIM, ins_in=INS_DIM,
+        vo_in=VO_DIM if args.use_vo else None,
         d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
         ffn_dim=args.ffn_dim, clip_len=args.clip_len,
     ).to(device)
@@ -149,18 +162,24 @@ def main():
             kin = batch["kin"].to(device, non_blocking=True)
             ins = batch["ins"].to(device, non_blocking=True)
             y   = batch["label"].to(device, non_blocking=True)
+            vo  = batch["vo"].to(device, non_blocking=True) if args.use_vo else None
 
-            # modality dropout (§6.5) — independent per sample, both modalities never dropped
+            # modality dropout (§6.5) — independent per sample, at least one always on
             B = y.size(0)
             if args.modality_dropout > 0:
                 kin_keep = (torch.rand(B, device=device) > args.modality_dropout).float()
                 ins_keep = (torch.rand(B, device=device) > args.modality_dropout).float()
-                both_off = (kin_keep == 0) & (ins_keep == 0)
-                kin_keep[both_off] = 1.0   # ensure at least one is on
+                vo_keep  = ((torch.rand(B, device=device) > args.modality_dropout).float()
+                            if args.use_vo else None)
+                all_off  = (kin_keep == 0) & (ins_keep == 0)
+                if vo_keep is not None:
+                    all_off = all_off & (vo_keep == 0)
+                kin_keep[all_off] = 1.0   # ensure at least one is on
             else:
-                kin_keep = ins_keep = None
+                kin_keep = ins_keep = vo_keep = None
 
-            pred = model(kin, ins, kin_mask=kin_keep, ins_mask=ins_keep)
+            pred = model(kin, ins, vo=vo,
+                         kin_mask=kin_keep, ins_mask=ins_keep, vo_mask=vo_keep)
             loss = (loss_fn(pred, y) * w).mean()
             optim.zero_grad()
             loss.backward()
@@ -177,7 +196,8 @@ def main():
                 kin = batch["kin"].to(device, non_blocking=True)
                 ins = batch["ins"].to(device, non_blocking=True)
                 y   = batch["label"].to(device, non_blocking=True)
-                p = model(kin, ins)
+                vo  = batch["vo"].to(device, non_blocking=True) if args.use_vo else None
+                p = model(kin, ins, vo=vo)
                 preds.append(p); targets.append(y)
         preds = torch.cat(preds, dim=0); targets = torch.cat(targets, dim=0)
         val_loss = float(((preds - targets) ** 2).mean().item())   # plain MSE for comparability

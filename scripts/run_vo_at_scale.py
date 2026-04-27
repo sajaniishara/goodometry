@@ -74,6 +74,8 @@ def main():
                 pose_7d=out["pose_7d"],
                 pose_mat=out["pose_mat"],
                 valid=out["valid"],
+                stride_used=np.int32(out.get("stride_used", 1)),
+                n_droid_frames=np.int32(out.get("n_droid_frames", len(out["frame_idx"]))),
             )
             dt = time.time() - t0
             rec = {
