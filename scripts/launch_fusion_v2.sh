@@ -31,7 +31,7 @@ if [[ "${VO_COUNT}" -lt 800 ]]; then
   exit 1
 fi
 
-ERROR_COUNT=$(grep -c '"status": "error"' logs/vo_scale_droid.jsonl 2>/dev/null || echo 0)
+ERROR_COUNT=$(grep -c '"status": "error"' logs/vo_scale_droid.jsonl 2>/dev/null) || ERROR_COUNT=0
 if [[ "${ERROR_COUNT}" -gt 0 ]]; then
   echo "WARNING: ${ERROR_COUNT} DROID errors in logs/vo_scale_droid.jsonl."
   echo "Consider re-running failed trajectories with:"

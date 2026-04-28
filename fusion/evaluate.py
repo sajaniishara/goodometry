@@ -141,6 +141,33 @@ def main():
         json.dump(result, f, indent=2)
     print(f"\nSaved {run_dir / 'test_results.json'}")
 
+    # Per-trajectory breakdown (clips are in order — shuffle=False).
+    traj_preds: dict[str, list] = {}
+    traj_tgts:  dict[str, list] = {}
+    for i, (traj_dir, _) in enumerate(test_ds.clips):
+        traj_preds.setdefault(traj_dir, []).append(preds[i])
+        traj_tgts.setdefault(traj_dir, []).append(tgts[i])
+
+    per_traj = []
+    for traj_dir in sorted(traj_preds.keys()):
+        p = np.stack(traj_preds[traj_dir])
+        t = np.stack(traj_tgts[traj_dir])
+        e = p - t
+        per_traj.append({
+            "trajectory": os.path.basename(traj_dir),
+            "n_clips": len(p),
+            "rmse_overall": float(np.sqrt((e ** 2).mean())),
+            "rmse_lin":     float(np.sqrt((e[:, :3] ** 2).mean())),
+            "rmse_ang":     float(np.sqrt((e[:, 3:] ** 2).mean())),
+            "rmse_per_axis": np.sqrt((e ** 2).mean(axis=0)).tolist(),
+            "p50_per_axis":  np.median(np.abs(e), axis=0).tolist(),
+            "p95_per_axis":  np.percentile(np.abs(e), 95, axis=0).tolist(),
+        })
+
+    with open(run_dir / "per_traj_results.json", "w") as f:
+        json.dump(per_traj, f, indent=2)
+    print(f"Saved {run_dir / 'per_traj_results.json'} ({len(per_traj)} trajectories)")
+
 
 if __name__ == "__main__":
     main()

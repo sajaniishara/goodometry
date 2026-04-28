@@ -56,7 +56,31 @@ The latest `go2_research/runs/cnn_rgb_stage2/` checkpoint. Trained Sessions 18�
 | Best val loss | **0.0176 at epoch 7** |
 | Training wall-clock | ~37 minutes (GPU 1, co-resident with Stage-2) |
 
-### 1.3 fusion_v1_marg (kinematics + INS-MARG, drift-free yaw)
+### 1.3 fusion_v2 (kinematics + INS + VO)
+
+| Knob | Value |
+|---|---|
+| Architecture | `FusionTransformer` — factorized modal-then-temporal causal transformer |
+| Modalities (M=3) | kinematics token (31D MLP→128), INS-IMU-only token (10D MLP→128), VO token (7D MLP→128) |
+| VO feature | per-frame SE(3) delta in prev-camera frame: `[dt_x, dt_y, dt_z, dq_x, dq_y, dq_z, dq_w]` |
+| VO source | DROID-SLAM at stride=3, fast=True, 1,008 trajectories |
+| d_model / heads / FFN / blocks | 128 / 4 / 256 / 2 |
+| Parameters | **455,046** |
+| Best val loss | **0.0126 at epoch 31** |
+| Training wall-clock | ~82 minutes |
+
+### 1.4 fusion_v2_marg (kinematics + INS-MARG + VO)
+
+Identical to fusion_v2 except `--ins-file ins_marg.npz` (MARG drift-free yaw).
+
+| Knob | Value |
+|---|---|
+| Best val loss | **0.0149 at epoch 18** |
+| Training wall-clock | ~60 minutes |
+
+**Note:** MARG does not help when VO is present — fusion_v2 (IMU-only) outperforms fusion_v2_marg on all axes.
+
+### 1.5 fusion_v1_marg (kinematics + INS-MARG, drift-free yaw)
 
 Identical to fusion_v1 except:
 
@@ -103,7 +127,7 @@ This means the "each model on its own test set" numbers aren't directly comparab
 
 ## 3. Test-set evaluations
 
-Three evaluations were run; all reported in each model's native label frame.
+All evaluations reported in each model's native label frame.
 
 ### 3.1 Stage-2 on its own test set (152 trajectories)
 
@@ -181,27 +205,6 @@ axis        Stage-2     fusion_v1      Δ
   ωz (yaw)   0.0709      0.0542      −23.6 %
 ```
 
----
-
-## 4. Summary tables
-
-### 4.1 Each model on its own test split
-
-| | **Pre-Session-18 v1 best** | **Stage-2** | **fusion_v1** | **fusion_v1_marg** |
-|---|---:|---:|---:|---:|
-| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | factorized transformer | factorized transformer |
-| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 |
-| Visual input | RAFT-Stereo disparity | RGB | none | none |
-| INS variant | n/a | imu9 (raw) | IMU-only Madgwick | MARG stitched (drift-free yaw) |
-| Train wall-clock | hours | ~5 days | **~37 min** | ~38 min |
-| Test trajectories | (different split) | 152 | 208 | 208 |
-| Test clips | — | 68,557 | 92,935 | 92,935 |
-| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | **0.0844** |
-| Linear RMSE | 0.1384 m/s | 0.0902 m/s | 0.0637 m/s | **0.0586 m/s** |
-| Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | **0.1039 rad/s** |
-
-**Caveat** — three different test sets and two different label frames (Stage-2's linear targets are world-frame; fusion's are body-frame). Numbers are comparable in magnitude but not strictly the same metric.
-
 ### 4.2 Same 71 trajectories, both models held out (apples-to-apples)
 
 | metric | Stage-2 | fusion_v1 | Δ |
@@ -220,7 +223,7 @@ axis        Stage-2     fusion_v1      Δ
 
 - **`vy` halved** — lateral velocity is the most directly observable signal from leg kinematics (foot-position deltas), which fusion_v1 ingests as a 12-dim feature instead of having to learn it from RGB.
 - **`ωy` and `ωz` both improved ~25 %** — IMU gyro carries them directly; the temporal attention on the gyro channel beats mid-fusion CNN.
-- **`vx`/`vz` smaller wins** — these axes couple most tightly to forward visual motion, the one signal Stage-2 has and fusion_v1 doesn't. Adding the VO modality (`fusion_v2`) should close this gap further.
+- **`vx`/`vz` smaller wins** — these axes couple most tightly to forward visual motion, the one signal Stage-2 has and fusion_v1 doesn't. fusion_v2 closes this gap: `vx` drops from 0.0734 → 0.0562 (−23 %), `vz` from 0.0482 → 0.0453 (−6 %).
 - **`ωx` (roll rate) only −4 %** — fundamentally noisy: gait-induced ±5–10 ° body rocking at 2 Hz that both models smooth out similarly.
 
 ### 4.3 fusion_v1 vs fusion_v1_marg — what does drift-free yaw buy?
@@ -246,6 +249,71 @@ So the mag is *not useless* in this configuration, just modestly helpful. For si
 
 ---
 
+---
+
+## 3.4 fusion_v2 on the 208-trajectory test set (kin + IMU + VO)
+
+`fusion/evaluate.py` → `runs/fusion_v2/test_results.json`. 92,935 clips. Best checkpoint epoch 31.
+
+| axis | RMSE | P50 | P95 | units |
+|---|---:|---:|---:|---|
+| `vx` (body) | 0.0562 | 0.0288 | 0.1109 | m/s |
+| `vy` (body) | 0.0425 | 0.0213 | 0.0800 | m/s |
+| `vz` (body) | 0.0453 | 0.0206 | 0.0811 | m/s |
+| `ωx` (body) | 0.1272 | 0.0556 | 0.1958 | rad/s |
+| `ωy` (body) | 0.0737 | 0.0295 | 0.1087 | rad/s |
+| `ωz` (body) | 0.0630 | 0.0166 | 0.0678 | rad/s |
+
+```
+overall RMSE  0.0737
+linear  RMSE  0.0483 m/s    (body frame)
+angular RMSE  0.0924 rad/s
+```
+
+### 3.5 fusion_v2_marg on the 208-trajectory test set (kin + MARG + VO)
+
+`runs/fusion_v2_marg/test_results.json`. 92,935 clips. Best checkpoint epoch 18.
+
+| axis | RMSE | P50 | P95 | units |
+|---|---:|---:|---:|---|
+| `vx` (body) | 0.0636 | 0.0312 | 0.1272 | m/s |
+| `vy` (body) | 0.0459 | 0.0234 | 0.0863 | m/s |
+| `vz` (body) | 0.0486 | 0.0224 | 0.0888 | m/s |
+| `ωx` (body) | 0.1425 | 0.0716 | 0.2323 | rad/s |
+| `ωy` (body) | 0.0808 | 0.0340 | 0.1223 | rad/s |
+| `ωz` (body) | 0.0677 | 0.0208 | 0.0825 | rad/s |
+
+```
+overall RMSE  0.0816
+linear  RMSE  0.0533 m/s
+angular RMSE  0.1023 rad/s
+```
+
+**Note:** unlike fusion_v1 where MARG improved over IMU-only, fusion_v2_marg is *worse* than fusion_v2 on every axis. The VO modality already provides orientation context (SE(3) deltas contain relative rotation), making the MARG's drift-free yaw redundant. IMU-only + VO is the better combination.
+
+---
+
+## 4. Summary tables
+
+### 4.1 Each model on its own test split
+
+| | **Pre-Session-18 v1 best** | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** |
+|---|---:|---:|---:|---:|---:|---:|
+| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | factorized transformer | factorized transformer | factorized transformer | factorized transformer |
+| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 |
+| Visual input | RAFT-Stereo disparity | RGB | none | none | VO (DROID-SLAM) | VO (DROID-SLAM) |
+| INS variant | n/a | imu9 (raw) | IMU-only Madgwick | MARG stitched | IMU-only Madgwick | MARG stitched |
+| Train wall-clock | hours | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min |
+| Test trajectories | (different split) | 152 | 208 | 208 | 208 | 208 |
+| Test clips | — | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 |
+| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 |
+| Linear RMSE | 0.1384 m/s | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | **0.0483 m/s** | 0.0533 m/s |
+| Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s |
+
+**fusion_v2 is the current best on every metric.** Adding VO (DROID-SLAM SE(3) deltas) improves over the best fusion_v1 variant by −12.7 % overall, −17.5 % linear, −11.1 % angular — and beats Stage-2 by −42 % overall while using 73× fewer parameters.
+
+**Caveat** — Stage-2's linear targets are world-frame vs body-frame for fusion. Angular is body-frame for both (strictly apples-to-apples). See §5 for detailed caveats.
+
 ## 5. Caveats and what to read into the comparison
 
 1. **Three different test splits** in §4.1. Read Stage-2 vs fusion numbers there as "approximate magnitudes". The honest comparison is §4.2 (the 71 held-out-from-both subset).
@@ -256,7 +324,7 @@ So the mag is *not useless* in this configuration, just modestly helpful. For si
 
 4. **The fair head-to-head test (§4.2) used 71 trajectories.** Statistical noise on per-axis metrics is non-trivial at this scale (rough 95 % CI ±3 % on overall RMSE). The ~50 % `vy` improvement is well outside that; the ~4 % `ωx` improvement is inside it.
 
-5. **fusion_v1 has no visual modality yet.** Adding the VO arm (`fusion_v2`, after DROID-SLAM at-scale finishes — ~5 more days) is expected to close the remaining `vx`/`vz` gaps further. The current numbers are the *floor* of the new pipeline's performance.
+5. **fusion_v2 adds VO (DROID-SLAM SE(3) deltas).** Confirmed improvement over fusion_v1 on every axis. See §3.4 and §4.1 for the full breakdown.
 
 ---
 
@@ -270,6 +338,12 @@ So the mag is *not useless* in this configuration, just modestly helpful. For si
 | fusion_v1 test JSON | `~/projects/goodometry/runs/fusion_v1/test_results.json` |
 | fusion_v1_marg ckpt | `~/projects/goodometry/runs/fusion_v1_marg/best_model.pt` |
 | fusion_v1_marg test | `~/projects/goodometry/runs/fusion_v1_marg/test_results.json` |
+| fusion_v2 checkpoint | `~/projects/goodometry/runs/fusion_v2/best_model.pt` |
+| fusion_v2 test JSON | `~/projects/goodometry/runs/fusion_v2/test_results.json` |
+| fusion_v2 per-traj | `~/projects/goodometry/runs/fusion_v2/per_traj_results.json` |
+| fusion_v2_marg ckpt | `~/projects/goodometry/runs/fusion_v2_marg/best_model.pt` |
+| fusion_v2_marg test | `~/projects/goodometry/runs/fusion_v2_marg/test_results.json` |
+| fusion_v2_marg per-traj | `~/projects/goodometry/runs/fusion_v2_marg/per_traj_results.json` |
 | Fair head-to-head | `~/projects/goodometry/runs/fair_head_to_head.json` |
 | Stride sweep | `~/projects/goodometry/pilot/stride_sweep_results.json` |
 | Training scripts | `~/projects/goodometry/fusion/train.py` and `~/projects/go2_research/run_cnn_rgb_stage2.sh` |
