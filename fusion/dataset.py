@@ -14,18 +14,31 @@ import torch
 from torch.utils.data import Dataset
 
 
-KINEMATICS_DIM = 31        # foot_pos 12 + foot_vel 12 + contact 4 + v_body_legs 3
+KINEMATICS_DIM    = 31     # foot_pos 12 + foot_vel 12 + contact 4 + v_body_legs 3
+KINEMATICS_V3_DIM = 35     # foot_pos 12 + foot_vel 12 + contact 4 + leg_odom_delta 7
 INS_DIM = 10               # quat 4 + accel_world 3 + gyro_body 3
 VO_DIM = 7                 # per-frame SE(3) delta in prev-camera frame: [dt_x, dt_y, dt_z, dq_x, dq_y, dq_z, dq_w]
 LABEL_DIM = 6
 
 
 def _build_kin_features(kin: dict, start: int, end: int) -> np.ndarray:
+    """31-D kinematics feature (fusion_v1 / fusion_v2 — unchanged)."""
     fp = kin["foot_pos_body"][start:end].reshape(end - start, 12)
     fv = kin["foot_vel_body"][start:end].reshape(end - start, 12)
     cp = kin["contact_prob"][start:end]                       # (T, 4)
     vb = kin["v_body_legs"][start:end]                        # (T, 3)
     return np.concatenate([fp, fv, cp, vb], axis=1).astype(np.float32)
+
+
+def _build_kin_v3_features(kin: dict, start: int, end: int) -> np.ndarray:
+    """35-D kinematics feature (fusion_v3): replaces v_body_legs(3) with
+    leg_odom_delta(7) — SE(3) per-frame delta [Δtx,Δty,Δtz,Δqx,Δqy,Δqz,Δqw].
+    foot_pos/vel and contact_prob are identical to the v2 branch."""
+    fp  = kin["foot_pos_body"][start:end].reshape(end - start, 12)
+    fv  = kin["foot_vel_body"][start:end].reshape(end - start, 12)
+    cp  = kin["contact_prob"][start:end]                      # (T, 4)
+    lod = kin["leg_odom_delta"][start:end]                    # (T, 7)
+    return np.concatenate([fp, fv, cp, lod], axis=1).astype(np.float32)
 
 
 def _build_ins_features(ins: dict, start: int, end: int) -> np.ndarray:
@@ -164,6 +177,7 @@ class GoFusionDataset(Dataset):
         ins_file: str = "ins.npz",    # "ins.npz" (IMU-only) or "ins_marg.npz" (MARG)
         vo_file:  str = "vo.npz",
         use_vo:   bool = False,
+        kin_v3:   bool = False,       # use 35-D kin features (leg_odom_delta) for fusion_v3
     ):
         self.clip_len = clip_len
         self.stride = stride
@@ -176,10 +190,13 @@ class GoFusionDataset(Dataset):
         self.use_vo   = use_vo
 
         # Precompute clip index: each entry is (traj_dir, start_frame_in_clip_array).
+        self.kin_v3   = kin_v3
         self.clips: list[tuple[str, int]] = []
         self.traj_n: dict[str, int] = {}
         for t in self.trajs:
             if use_vo and not os.path.exists(os.path.join(t, vo_file)):
+                continue
+            if kin_v3 and not np.load(os.path.join(t, "kin.npz"), mmap_mode="r").__contains__("leg_odom_delta"):
                 continue
             n = len(np.load(os.path.join(t, "sensors.npz"))["frame_idx"])
             self.traj_n[t] = n
@@ -200,7 +217,8 @@ class GoFusionDataset(Dataset):
         ins = np.load(os.path.join(traj, self.ins_file))
         lab = np.load(os.path.join(traj, "labels_body.npz"))
 
-        kin_feat = _build_kin_features(kin, start, end)                  # (T, 31)
+        kin_feat = (_build_kin_v3_features(kin, start, end) if self.kin_v3
+                    else _build_kin_features(kin, start, end))            # (T, 35) or (T, 31)
         ins_feat = _build_ins_features(ins, start, end)                  # (T, 10)
         # Label at last timestep.
         lin = lab["lin_vel_body"][end - 1]                               # (3,)
@@ -230,7 +248,8 @@ class GoFusionDataset(Dataset):
 
 def compute_norm_stats(dataset_trajs: list[str], sample_frac: float = 0.2,
                         seed: int = 42, ins_file: str = "ins.npz",
-                        use_vo: bool = False, vo_file: str = "vo.npz") -> dict:
+                        use_vo: bool = False, vo_file: str = "vo.npz",
+                        kin_v3: bool = False) -> dict:
     """Compute per-channel mean/std over a random subset of training trajectories."""
     rng = np.random.RandomState(seed)
     subset = list(dataset_trajs)
@@ -246,7 +265,8 @@ def compute_norm_stats(dataset_trajs: list[str], sample_frac: float = 0.2,
         kin = np.load(os.path.join(t, "kin.npz"))
         ins = np.load(os.path.join(t, ins_file))
         N = len(kin["foot_pos_body"])
-        kin_rows.append(_build_kin_features(kin, 0, N))
+        kin_rows.append(_build_kin_v3_features(kin, 0, N) if kin_v3
+                        else _build_kin_features(kin, 0, N))
         ins_rows.append(_build_ins_features(ins, 0, N))
         if use_vo:
             vo = np.load(os.path.join(t, vo_file))

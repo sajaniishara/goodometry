@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, "/home/anyone/projects/goodometry")
-from fusion.dataset import GoFusionDataset, split_trajectories, KINEMATICS_DIM, INS_DIM, VO_DIM
+from fusion.dataset import GoFusionDataset, split_trajectories, KINEMATICS_DIM, KINEMATICS_V3_DIM, INS_DIM, VO_DIM
 from fusion.model import FusionTransformer
 
 
@@ -60,6 +60,8 @@ def main():
     use_vo   = run_args.get("use_vo", False)
     vo_file  = run_args.get("vo_file", "vo.npz")
     vo_norm  = (stats["vo_mean"], stats["vo_std"]) if use_vo else None
+    use_kin_v3 = run_args.get("use_kin_v3", False)
+    kin_dim    = KINEMATICS_V3_DIM if use_kin_v3 else KINEMATICS_DIM
 
     test_ds = GoFusionDataset(
         test_trajs,
@@ -71,6 +73,7 @@ def main():
         ins_file=ins_file,
         vo_file=vo_file,
         use_vo=use_vo,
+        kin_v3=use_kin_v3,
     )
     print(f"test clips: {len(test_ds):,}", flush=True)
 
@@ -79,7 +82,7 @@ def main():
                               pin_memory=(device.type == "cuda"))
 
     model = FusionTransformer(
-        kin_in=KINEMATICS_DIM, ins_in=INS_DIM,
+        kin_in=kin_dim, ins_in=INS_DIM,
         vo_in=VO_DIM if use_vo else None,
         d_model=run_args["d_model"], n_blocks=run_args["n_blocks"],
         n_heads=run_args["n_heads"], ffn_dim=run_args["ffn_dim"],

@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, "/home/anyone/projects/goodometry")
 from fusion.dataset import (
     GoFusionDataset, split_trajectories, compute_norm_stats,
-    KINEMATICS_DIM, INS_DIM, VO_DIM, LABEL_DIM,
+    KINEMATICS_DIM, KINEMATICS_V3_DIM, INS_DIM, VO_DIM, LABEL_DIM,
 )
 from fusion.model import FusionTransformer, param_count
 
@@ -62,6 +62,9 @@ def parse_args():
     ap.add_argument("--use-vo", action="store_true", default=False,
                     help="add VO modality (fusion_v2); requires vo.npz in each trajectory dir")
     ap.add_argument("--vo-file", default="vo.npz")
+    ap.add_argument("--use-kin-v3", action="store_true", default=False,
+                    help="use 35-D kin features with leg_odom_delta SE(3) (fusion_v3); "
+                         "requires patch_kin_leg_odom_delta.py to have been run")
     return ap.parse_args()
 
 
@@ -98,9 +101,11 @@ def main():
         val_trajs = val_trajs[:args.max_val_trajs]
     print(f"split: train={len(train_trajs)} val={len(val_trajs)} test={len(test_trajs)}", flush=True)
 
+    kin_dim = KINEMATICS_V3_DIM if args.use_kin_v3 else KINEMATICS_DIM
     stats = compute_norm_stats(train_trajs, sample_frac=0.2, seed=args.seed,
                                 ins_file=args.ins_file,
-                                use_vo=args.use_vo, vo_file=args.vo_file)
+                                use_vo=args.use_vo, vo_file=args.vo_file,
+                                kin_v3=args.use_kin_v3)
     np.savez(out / "norm_stats.npz", **stats)
     msg = (f"norm stats:  kin|μ|={np.abs(stats['kin_mean']).mean():.3f}"
            f"  kin|σ|={stats['kin_std'].mean():.3f}"
@@ -116,10 +121,12 @@ def main():
 
     train_ds = GoFusionDataset(train_trajs, args.clip_len, args.stride, kin_norm, ins_norm,
                                 vo_norm=vo_norm, ins_file=args.ins_file,
-                                vo_file=args.vo_file, use_vo=args.use_vo)
+                                vo_file=args.vo_file, use_vo=args.use_vo,
+                                kin_v3=args.use_kin_v3)
     val_ds   = GoFusionDataset(val_trajs,   args.clip_len, args.stride, kin_norm, ins_norm,
                                 vo_norm=vo_norm, ins_file=args.ins_file,
-                                vo_file=args.vo_file, use_vo=args.use_vo)
+                                vo_file=args.vo_file, use_vo=args.use_vo,
+                                kin_v3=args.use_kin_v3)
     print(f"clips: train={len(train_ds):,}  val={len(val_ds):,}", flush=True)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -130,7 +137,7 @@ def main():
 
     # --- model + optimizer ---
     model = FusionTransformer(
-        kin_in=KINEMATICS_DIM, ins_in=INS_DIM,
+        kin_in=kin_dim, ins_in=INS_DIM,
         vo_in=VO_DIM if args.use_vo else None,
         d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
         ffn_dim=args.ffn_dim, clip_len=args.clip_len,
