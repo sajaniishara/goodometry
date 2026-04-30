@@ -2,7 +2,7 @@
 
 **Project**: `~/projects/goodometry/`
 **Data**: `/mnt/data/go2_research_dataset_v2/` (1,008 clean trajectories, 1,081 collected, 73 falls excluded)
-**Status as of 2026-04-26**: Three of four preprocessing arms complete; both fusion models (`fusion_v1` and `fusion_v1_marg`) trained, evaluated, and head-to-head'd against the Stage-2 RGB CNN baseline. VO arm restarted at stride=3 (Session 23) after empirical validation — ~2.4 days remaining for the full 1,008 trajectories. RAFT-Stereo disparity precompute also resumed at iters=32 on GPU 1 (~5 days remaining) for the existing v2 disparity-input experiments.
+**Status as of 2026-04-30**: All preprocessing arms complete (kin, ins, ins_marg, labels_body, vo — all 1,008/1,008). Four fusion models trained and evaluated (fusion_v1/v1_marg/v2/v2_marg). fusion_v2 is the current best (RMSE 0.0737). fusion_v3 (kin_v3 35D SE(3) delta) is training on GPU 1. RAFT-Stereo disparity paused at 879/1,008 to free GPU 1; resumable.
 
 ---
 
@@ -25,30 +25,32 @@ Predict the Unitree Go2's **6-DoF body-frame velocity** `(vx, vy, vz, ωx, ωy, 
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Per-trajectory preprocessing (per `frame_idx` aligned)               │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Stereo camera   →  DROID-SLAM     →  vo.npz       (SE(3) per frame)  │
-│ Joint encoders  →  pytorch_kin    →  kin.npz      (31D features)     │
-│ IMU + (mag)     →  Madgwick       →  ins.npz      (10D features)     │
-│ World-frame GT  →  R_wb^T rotate  →  labels_body  (6D supervision)   │
+│ Stereo camera   →  DROID-SLAM      →  vo.npz       (SE(3) per frame) │
+│ Joint encoders  →  pytorch_kin     →  kin.npz      (31D features)    │
+│                    + leg_odom_patch →  kin.npz      (+7D SE(3) delta) │
+│ IMU + (mag)     →  Madgwick        →  ins.npz      (10D features)    │
+│ World-frame GT  →  R_wb^T rotate   →  labels_body  (6D supervision)  │
 │ FR_calf         →  per-traj offset →  calibration.npz                │
 └──────────────────────────────────────────────────────────────────────┘
                                ↓
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Fusion model (FusionTransformer, ~440 K params)                      │
+│ Fusion model (FusionTransformer, M=3)                                │
 │                                                                      │
-│   [kin 31D] → MLP → 128D ─┐                                          │
-│   [ins 10D] → MLP → 128D ─┼→ (B, T=40, M=2, D=128)                   │
-│   [vo  7D]  → MLP → 128D ─┘   (M=3 once VO arm is done)              │
+│   fusion_v2:  [kin 31D] → MLP → 128D ─┐                              │
+│   fusion_v3:  [kin 35D] → MLP → 128D ─┤                              │
+│               [ins 10D] → MLP → 128D ─┼→ (B, T=40, M=3, D=128)       │
+│               [vo   7D] → MLP → 128D ─┘                              │
 │                                                                      │
 │   Block × 2:                                                         │
 │      modal self-attn over M tokens (cheap)                           │
 │      causal temporal self-attn over T=40 (1.3 s context)             │
 │      FFN                                                             │
 │                                                                      │
-│   Mean over M → last timestep → Linear → (vx,vy,vz,ωx,ωy,ωz) body    │
+│   Mean over M → last timestep → Linear → (vx,vy,vz,ωx,ωy,ωz) body   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Per-timestep input feature dimension once the VO arm is done: ~48 channels (kin 31 + ins 10 + vo 7). No LiDAR — Go2 doesn't have one in this dataset.
+Per-timestep input: 48 channels for fusion_v2 (kin 31 + ins 10 + vo 7); 52 channels for fusion_v3 (kin 35 + ins 10 + vo 7). No LiDAR — Go2 doesn't have one in this dataset.
 
 ---
 
@@ -337,9 +339,37 @@ angular   RMSE = 0.1039 rad/s (-10.1%)
 
 **Empirical answer to the mag question**: val curves looked nearly identical, but on held-out test the MARG variant beats IMU-only by **8–10% across every metric**. The biggest single-axis win is `ωx` (roll rate, −13.9%) — drift-free yaw indirectly stabilises the model's body-rate estimates by giving it a more consistent quaternion reference across the 1.3 s context window. So the magnetometer is **not useless** in this configuration, just modestly helpful, and the IMU-only-by-default in Session 21 is justified primarily on sim-to-real grounds (§3.2) rather than because mag adds nothing.
 
-### 6.3 Stage-2 CNN RGB (v2 baseline, end-to-end) ✅ converged 2026-04-25, test eval done
+### 6.3 fusion_v2 (kinematics + INS + VO) ✅ trained 2026-04-26, evaluated 2026-04-26
 
-The latest `go2_research/runs/cnn_rgb_stage2/` model — 33.5 M parameter R3D-18 + sensor-branch CNN, trained for 30 epochs on RGB only (Sessions 18–21 of the original CHANGES). Best val_loss 0.0210 at epoch 20. Test on 152 trajectories (705/151/152 stratified split, slightly different from goodometry's 650/150/208 — both stratified by terrain with seed=42, but the count split differs; numbers are comparable in magnitude not on identical samples).
+Same architecture as fusion_v1 with a third modality token (VO, 7D MLP→128). M=3, 455,046 params. Best at epoch 31, ~82 min wall-clock.
+
+**Test set** (208 trajectories, 92,935 clips):
+
+```
+axis    rmse     p50     p95   units
+  vx   0.0562  0.0288  0.1109  m/s
+  vy   0.0425  0.0213  0.0800  m/s
+  vz   0.0453  0.0206  0.0811  m/s
+  ωx   0.1272  0.0556  0.1958  rad/s
+  ωy   0.0737  0.0295  0.1087  rad/s
+  ωz   0.0630  0.0166  0.0678  rad/s
+
+overall   RMSE = 0.0737    ← CURRENT BEST
+linear    RMSE = 0.0483 m/s
+angular   RMSE = 0.0924 rad/s
+```
+
+Adding VO improves over fusion_v1_marg by −12.7% overall. Biggest gains on `vx` (−22.4%) and `vz` (−9.7%) — visual ego-motion axes. Per-trajectory results in `runs/fusion_v2/per_traj_results.json`.
+
+### 6.4 fusion_v2_marg (kinematics + INS-MARG + VO) ✅ trained + evaluated 2026-04-26
+
+Identical to fusion_v2, `--ins-file ins_marg.npz`. Best at epoch 18, ~60 min. **Test RMSE: 0.0816** — worse than fusion_v2 on every axis.
+
+Key finding: MARG's drift-free yaw is **redundant when VO is present**. VO's SE(3) deltas already carry relative rotation, so the MARG contribution overlaps. IMU-only + VO (fusion_v2) is the better combination.
+
+### 6.5 Stage-2 CNN RGB (v2 baseline, end-to-end) ✅ converged 2026-04-25, test eval done
+
+The latest `go2_research/runs/cnn_rgb_stage2/` model — 33.5 M parameter R3D-18 + sensor-branch CNN, trained for 30 epochs on RGB only (Sessions 18–21 of the original CHANGES). Best val_loss 0.0210 at epoch 20. Test on 152 trajectories (705/151/152 stratified split — original run; cnn3d split later corrected to 650/149/208 to match goodometry).
 
 **Test set** (68,557 clips):
 
@@ -357,26 +387,25 @@ linear   RMSE  0.0902 m/s
 angular  RMSE  0.1553 rad/s
 ```
 
-### 6.4 Head-to-head comparison — each model on its own test split
+### 6.6 Head-to-head comparison — each model on its own test split
 
-| | Pre-Session-18 v1 best (test) | **Stage-2 (test)** | **fusion_v1 (test)** | **fusion_v1_marg (test)** |
-|---|---|---|---|---|
-| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | factorized transformer | same |
-| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 |
-| Train wall-clock | ~hours | ~5 days | **~37 min** | ~38 min |
-| Visual input | RAFT-Stereo disparity | RGB | none | none |
-| INS | n/a | imu9 (raw) | IMU-only Madgwick | MARG stitched |
-| Test trajectories | (different split) | 152 | 208 | 208 |
-| Test clips | — | 68,557 | 92,935 | 92,935 |
-| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | **0.0844** |
-| Linear RMSE (m/s) | 0.1384 | 0.0902 | 0.0637 | **0.0586** |
-| Angular RMSE (rad/s) | 0.2612 | 0.1553 | 0.1156 | **0.1039** |
+| | Pre-S18 best | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** |
+|---|---|---|---|---|---|---|
+| Architecture | MViT+RAFT | R3D-18+CNN | transformer | transformer | transformer | transformer |
+| Parameters | ~35 M | 33,485,894 | 437,382 | 437,382 | 455,046 | 455,046 |
+| Train time | ~hours | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min |
+| Visual input | RAFT disp | RGB | — | — | VO (DROID) | VO (DROID) |
+| INS | n/a | imu9 raw | IMU-only | MARG | IMU-only | MARG |
+| Test trajs | diff split | 152 | 208 | 208 | 208 | 208 |
+| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 |
+| Linear RMSE (m/s) | 0.1384 | 0.0902 | 0.0637 | 0.0586 | **0.0483** | 0.0533 |
+| Angular RMSE (rad/s) | 0.2612 | 0.1553 | 0.1156 | 0.1039 | **0.0924** | 0.1023 |
 
-**Caveat**: each model is on a different test split (and Stage-2 uses world-frame linear targets while fusion uses body-frame). Numbers comparable in magnitude, not strictly the same metric. See `EXPERIMENTS.md` §2 for the split-overlap table.
+**fusion_v2 is the current best.** Adding VO (DROID-SLAM SE(3) deltas) beats fusion_v1_marg by −12.7% overall, and beats Stage-2 by −42% overall with 73× fewer parameters. Stage-2 uses world-frame linear targets while fusion uses body-frame — angular RMSE is strictly comparable, linear is approximate.
 
-### 6.5 Fair head-to-head — same 71 trajectories, both models held out
+### 6.7 Fair head-to-head — same 71 trajectories, both models held out
 
-To eliminate the split caveat, evaluated both models on the 71 trajectories that are **in fusion's test set ∩ NOT in Stage-2's training set** (so neither model trained on any of them). 31,791 fusion clips and 32,075 Stage-2 clips.
+Evaluated both fusion_v1 and Stage-2 on the 71 trajectories **in fusion's test set ∩ NOT in Stage-2's training set**. 31,791 fusion clips and 32,075 Stage-2 clips (neither model trained on any of them).
 
 ```
 metric                   Stage-2     fusion_v1      Δ
@@ -393,9 +422,7 @@ axis        Stage-2     fusion_v1      Δ
   ωz (yaw)   0.0709      0.0542      −23.6 %
 ```
 
-Saved to `runs/fair_head_to_head.json`.
-
-`fusion_v1` wins on every axis while being **77× smaller, ~200× faster to train, and without a visual modality**. The biggest win is `vy` (lateral velocity, −50%) — the signal FK preprocessing gives the network "for free" via foot-position deltas. Adding the VO arm (`fusion_v2`) when DROID-SLAM at-scale finishes should close the remaining `vx/vz` gaps where visual ego-motion contributes most.
+Saved to `runs/fair_head_to_head.json`. `fusion_v1` wins on every axis while being 77× smaller, ~200× faster to train, and without any visual input. The `vy` −50% win comes from FK foot-position deltas giving lateral velocity "for free". fusion_v2 closes the `vx`/`vz` gap further via VO (−23% and −6% respectively).
 
 ---
 
@@ -403,63 +430,67 @@ Saved to `runs/fair_head_to_head.json`.
 
 ```
 ~/projects/goodometry/
-├── PIPELINE.md                       (this document)
-├── godometry/                        (the two design docs from your zip)
+├── PIPELINE.md                           (this document)
+├── CHANGES.md                            (session-by-session change log)
+├── EXPERIMENTS.md                        (all model configs + test results)
+├── godometry/                            (the two design docs from your zip)
 │   ├── go2-concrete-algorithms.md
 │   └── go2-preprocessing-options.md
 ├── configs/
-│   ├── go2_camera.yaml               (intrinsics, baseline, frame conventions)
-│   └── fr_calf_offsets.json          (per-traj calibration summary)
-├── calibration/                       (FR_calf offset)
-│   └── __init__.py                   (load_calibrated_joints)
+│   ├── go2_camera.yaml                   (intrinsics, baseline, frame conventions)
+│   └── fr_calf_offsets.json              (per-traj calibration summary)
+├── calibration/
+│   └── __init__.py                       (load_calibrated_joints)
 ├── kinematics/
-│   ├── fk.py                         (Go2FK + finite-diff foot velocity)
-│   ├── contact.py                    (velocity-gate soft contact)
-│   └── leg_odom.py                   (§1.2 body-velocity-from-legs)
+│   ├── fk.py                             (Go2FK + finite-diff foot velocity)
+│   ├── contact.py                        (velocity-gate soft contact)
+│   └── leg_odom.py                       (body_velocity_from_legs + leg_odom_se3_deltas)
 ├── ins/
-│   └── madgwick.py                   (imufusion + two-pass MARG stitch)
-├── labels.py                         (world-to-body label rotation)
-├── vo/                                (DROID-SLAM + DPVO runners)
+│   └── madgwick.py                       (imufusion + two-pass MARG stitch)
+├── labels.py                             (world-to-body label rotation)
+├── vo/
 │   ├── dpvo_runner.py
 │   ├── droid_runner.py
 │   ├── gt.py
-│   └── eval.py                       (Umeyama ATE / RPE)
-├── fusion/                           (the model + trainer)
-│   ├── dataset.py                    (GoFusionDataset, stratified split, norm stats)
-│   ├── model.py                      (FusionTransformer, FactorizedBlock)
-│   ├── train.py
-│   └── evaluate.py                   (test-set evaluator)
+│   └── eval.py                           (Umeyama ATE / RPE)
+├── fusion/
+│   ├── dataset.py                        (GoFusionDataset, norm stats; KINEMATICS_DIM=31, KINEMATICS_V3_DIM=35)
+│   ├── model.py                          (FusionTransformer, FactorizedBlock)
+│   ├── train.py                          (--use-vo, --use-kin-v3, --ins-file flags)
+│   └── evaluate.py                       (test-set evaluator; outputs test_results.json + per_traj_results.json)
 ├── scripts/
-│   ├── env.sh                        (env_isaaclab + CUDA 13 toolchain)
+│   ├── env.sh                            (env_isaaclab + CUDA 13 toolchain)
 │   ├── compute_calf_calibration.py
 │   ├── precompute_labels_body.py
 │   ├── run_kin_at_scale.py
-│   ├── run_ins_at_scale.py           (--with-mag for ins_marg.npz)
+│   ├── run_ins_at_scale.py               (--with-mag for ins_marg.npz)
 │   ├── run_vo_at_scale.py
-│   └── launch_droid_at_scale.sh      (setsid nohup launcher)
+│   ├── patch_kin_leg_odom_delta.py       (adds leg_odom_delta to existing kin.npz, resume-safe)
+│   ├── launch_droid_at_scale.sh
+│   ├── launch_fusion_v2.sh               (kin 31D + INS + VO; --with-marg flag)
+│   ├── launch_fusion_v3.sh               (kin_v3 35D + INS + VO; GPU=N env override)
+│   └── launch_raft_resume.sh             (resume RAFT-Stereo disparity from last HDF5 checkpoint)
 ├── third_party/
-│   ├── DPVO/                         (cloned + patched + built)
-│   ├── DROID-SLAM/                   (cloned + patched + built)
-│   └── unitree_ros/                  (Go2 URDF source)
+│   ├── DPVO/
+│   ├── DROID-SLAM/
+│   └── unitree_ros/                      (Go2 URDF source)
 ├── runs/
-│   └── fusion_v1/
-│       ├── args.json
-│       ├── best_model.pt
-│       ├── last_model.pt
-│       ├── norm_stats.npz
-│       ├── train_log.csv
-│       ├── metrics.jsonl
-│       └── test_results.json
-└── logs/                             (training/preprocessing logs)
+│   ├── fusion_v1/                        (kin+INS, IMU-only; RMSE 0.0933)
+│   ├── fusion_v1_marg/                   (kin+INS-MARG; RMSE 0.0844)
+│   ├── fusion_v2/                        (kin+INS+VO, IMU-only; RMSE 0.0737 — current best)
+│   ├── fusion_v2_marg/                   (kin+INS-MARG+VO; RMSE 0.0816)
+│   ├── fusion_v3/                        (kin_v3+INS+VO, IMU-only; 🔄 training)
+│   └── fair_head_to_head.json            (71-traj apples-to-apples vs Stage-2)
+└── logs/
 
-/mnt/data/go2_research_dataset_v2/<traj>/    (per-trajectory data)
-├── sensors.npz       (raw, from Session 13/18)
-├── calibration.npz   (FR_calf offset, scalar + diagnostics)
-├── kin.npz           (foot pos/vel/contact + leg-odom v_body)
-├── ins.npz           (Madgwick IMU-only)
-├── ins_marg.npz      (Madgwick MARG stitched, drift-free yaw)
-├── labels_body.npz   (world→body rotated labels)
-└── vo.npz            (DROID-SLAM SE(3) per frame, when available)
+/mnt/data/go2_research_dataset_v2/<traj>/
+├── sensors.npz         (raw, from Session 13/18)
+├── calibration.npz     (FR_calf offset)
+├── kin.npz             (foot pos/vel/contact + v_body_legs + leg_odom_delta)
+├── ins.npz             (Madgwick IMU-only)
+├── ins_marg.npz        (Madgwick MARG stitched, drift-free yaw)
+├── labels_body.npz     (world→body rotated labels)
+└── vo.npz              (DROID-SLAM SE(3) per frame)
 ```
 
 ---
@@ -475,35 +506,141 @@ python scripts/run_kin_at_scale.py
 python scripts/run_ins_at_scale.py             # IMU-only ins.npz
 python scripts/run_ins_at_scale.py --with-mag  # MARG ins_marg.npz
 python scripts/precompute_labels_body.py
+bash scripts/launch_droid_at_scale.sh          # DROID-SLAM VO arm (stride=3, ~2.4 days)
 
-# 1. fusion_v1 (already trained)
+# 1. fusion_v1 — kin(31D) + INS (RMSE 0.0933)
 CUDA_VISIBLE_DEVICES=1 python -u fusion/train.py \
     --output-dir runs/fusion_v1 --device cuda \
     --epochs 50 --batch-size 128 --num-workers 4 --patience 10
-# Test:
 python fusion/evaluate.py --run-dir runs/fusion_v1 --device cuda
 
-# 2. fusion_v1_marg (in progress)
+# 2. fusion_v1_marg — kin(31D) + INS-MARG (RMSE 0.0844)
 CUDA_VISIBLE_DEVICES=1 python -u fusion/train.py \
     --output-dir runs/fusion_v1_marg --device cuda \
     --epochs 50 --batch-size 128 --num-workers 4 --patience 10 \
     --ins-file ins_marg.npz
 python fusion/evaluate.py --run-dir runs/fusion_v1_marg --device cuda
+
+# 3. fusion_v2 — kin(31D) + INS + VO (RMSE 0.0737, current best)
+GPU=1 bash scripts/launch_fusion_v2.sh
+python fusion/evaluate.py --run-dir runs/fusion_v2 --device cuda
+
+# 4. fusion_v2_marg — kin(31D) + INS-MARG + VO (RMSE 0.0816)
+GPU=1 bash scripts/launch_fusion_v2.sh --with-marg
+python fusion/evaluate.py --run-dir runs/fusion_v2_marg --device cuda
+
+# 5. fusion_v3 — kin_v3(35D SE(3) delta) + INS + VO (training in progress)
+# Pre-requisite: patch kin.npz files (already done for all 1,008)
+python scripts/patch_kin_leg_odom_delta.py
+# Launch:
+GPU=1 bash scripts/launch_fusion_v3.sh
+python fusion/evaluate.py --run-dir runs/fusion_v3 --device cuda
+
+# 6. fusion_v3_marg (MARG ablation for v3 — run after fusion_v3 completes)
+GPU=1 bash scripts/launch_fusion_v3.sh --with-marg
+python fusion/evaluate.py --run-dir runs/fusion_v3_marg --device cuda
 ```
 
 ---
 
 ## 9. Open issues and next steps
 
-1. **VO arm at scale.** DROID-SLAM at stride=3 (PID 169781, GPU 0, detached). ETA ~2.4 days for the remaining ~1,003 trajectories.
-2. **RAFT-Stereo disparity at scale.** Precompute resumed at iters=32 (PID 157759, GPU 1, detached). ETA ~5 days for the remaining ~482 trajectories. For the existing v2 CNN/MViT disparity-input experiments — distinct from the goodometry pipeline.
-3. **fusion_v2 (kin + ins + vo).** Adds one modality token to `FusionTransformer`, otherwise identical training. Run when DROID's vo.npz coverage is high enough (could start at ~80 % coverage with held-out trajectories sampled from the completed set). Expected to close the `vx`/`vz` gap where visual ego-motion helps most.
-4. **DROID buffer-overflow re-runs.** ~1 % of trajectories hit `IndexError: index 512 is out of bounds for dimension 0 with size 512` (long forest trajectories with many keyframes). Re-run those with `buffer=1024` after the main pass.
-5. **FR_calf root-cause.** Current per-trajectory offset masks the issue but doesn't fix it. If the project ever recollects the v2 dataset, investigating the Isaac Sim Go2 USD's FR_calf collision/foot mesh is worthwhile.
-6. **Sim-to-real for the magnetometer.** Sim mag is hardcoded `[23, 2, -42]` μT (mid-latitude S-hemisphere reference). The MARG ablation showed it buys ~10 % on test in pure-sim, but real Go2 deployment requires WMM/IGRF for the actual lat/lon plus per-unit hard-iron / soft-iron calibration. See §3.2.
-7. **Per-axis residuals.** `ωx` (roll rate) is the worst axis at 0.14–0.16 rad/s — mostly the body-rocking gait that VO and IMU smooth through. Leg kinematics could in principle constrain it (foot impact timing). Worth investigating once VO data is in.
-8. **Modality-dropout ablation.** Forced each modality off at *training*; never measured what happens when modalities are dropped at *inference*. The fusion-net's whole sales pitch is graceful degradation — should quantify it.
-9. **Stratified split alignment.** The two `split_trajectories` implementations (`go2_research/cnn3d/dataset.py` and `goodometry/fusion/dataset.py`) use different RNG types so even with the same seed they produce different orderings. Future cleanup item: unify them so head-to-head comparisons don't require the 71-trajectory clean-subset workaround.
+1. **VO arm at scale.** ✅ DONE — 1,008 vo.npz files. DROID-SLAM stride=3, fast=True, ~3.4 min/traj.
+2. **fusion_v2 (kin + ins + vo).** ✅ DONE — test RMSE 0.0737, current best model.
+3. **fusion_v3 (kin_v3 + ins + vo).** 🔄 Training on GPU 1 (PID 588249). See §11.
+4. **RAFT-Stereo disparity at scale.** Paused at 879/1,008 (~87%) to free GPU 1 for fusion_v3. Resume via `bash scripts/launch_raft_resume.sh` — HDF5 skip-existing logic makes it fully resumable.
+5. **DROID buffer-overflow re-runs.** ~1 % of trajectories hit `IndexError: index 512 is out of bounds for dimension 0 with size 512`. Re-run with `buffer=1024` after main pass.
+6. **FR_calf root-cause.** Per-trajectory offset masks the issue. If dataset is recollected, investigate the Isaac Sim Go2 USD FR_calf collision mesh.
+7. **Sim-to-real for the magnetometer.** Sim mag is hardcoded `[23, 2, -42]` μT. MARG ablation shows ~10 % improvement in pure-sim but real deployment requires WMM/IGRF + per-unit hard-iron/soft-iron calibration.
+8. **Modality-dropout ablation.** Trained with dropout, never measured inference-time modality removal. The fusion net's graceful-degradation guarantee should be quantified.
+9. **Stratified split rounding.** When `total == need == 1,008`, the `_fix` rounding correction can leave val at 149 instead of 150 (all trajectories already assigned, no unassigned ones to pull). Test set is always exactly 208.
+
+---
+
+---
+
+## 11. fusion_v3 pipeline — kin_v3 SE(3) delta kinematics
+
+**Status as of 2026-04-30:** Training on GPU 1 (PID 588249, `logs/fusion_v3.log`).
+
+### 11.1 Motivation
+
+`v_body_legs (N, 3)` in `kin.npz` is a raw per-timestep linear velocity estimate from the stance-foot constraint. It is informative in aggregate (over a window the transformer can average out the noise), but:
+
+1. It is **linear only** — the model has to cross-attend with the INS quaternion channel to infer rotational motion change.
+2. It is **noisy at per-timestep scale** — actuator jitter + finite-difference amplification. Amplitude is up to 0.5 m/s even at rest.
+
+A per-frame SE(3) delta `[Δtx, Δty, Δtz, Δqx, Δqy, Δqz, Δqw]` encodes both translation and rotation change in a single compact token, expressed in body frame, so the transformer can attend to it directly without cross-modality inference.
+
+### 11.2 What changes vs fusion_v2
+
+Only the kinematics feature vector changes. Everything else — architecture, training config, VO modality, INS modality, split, loss, clip length — is byte-identical to fusion_v2.
+
+| | fusion_v2 | fusion_v3 |
+|---|---|---|
+| kin feature dim | **31D** | **35D** |
+| last 3–7 dims | `v_body_legs [vx, vy, vz]` | `leg_odom_delta [Δtx,Δty,Δtz, Δqx,Δqy,Δqz,Δqw]` |
+| foot_pos / foot_vel / contact | identical | identical |
+| model params | 455,046 | **455,558** (+512 from kin projection MLP) |
+| INS / VO | unchanged | unchanged |
+
+### 11.3 leg_odom_delta computation (`kinematics/leg_odom.py`)
+
+```python
+def leg_odom_se3_deltas(v_body_legs, gyro_body, dt=1/30):
+    """(N, 7) per-frame SE(3) delta in body frame.
+
+    Δt = v_body_legs * dt         — translation from leg odometry
+    Δq = quat_from_rotvec(ω * dt) — rotation from gyro (Rodrigues, no scipy)
+
+    Output: [Δtx, Δty, Δtz, Δqx, Δqy, Δqz, Δqw]
+    Near-zero rotation (|rvec| < 1e-8): identity delta [0,0,0, 0,0,0,1].
+    """
+```
+
+The quaternion uses the Rodrigues formula: `axis = rvec / |rvec|`, `half_angle = |rvec| / 2`,
+`qxyz = axis * sin(half_angle)`, `qw = cos(half_angle)`.
+
+### 11.4 Patching existing kin.npz files
+
+`scripts/patch_kin_leg_odom_delta.py` appended `leg_odom_delta (N, 7)` to all 1,008 existing `kin.npz` files non-destructively (all original keys preserved). `v_body_legs` is still there for fusion_v1/v2 compatibility.
+
+- Resume-safe: skips trajectories already patched. `--force` re-patches all.
+- Ran in **81 seconds, 0 failures** on 1,008 trajectories (2026-04-30).
+
+### 11.5 Feature interpretation
+
+| Channel | Physical meaning |
+|---|---|
+| `Δtx, Δty, Δtz` | Body translation this frame (m), estimated from leg odometry |
+| `Δqx, Δqy, Δqz, Δqw` | Body rotation this frame (unit quaternion delta), estimated from gyro integration |
+
+- `Δt ≈ v_body_legs * (1/30)` — same signal as before, scaled to metres
+- `Δq` gives the model a direct rotational pose-change signal from the kin branch, *before* the INS channel is fused — useful when the transformer learns to cross-validate kin and INS rotation estimates
+
+### 11.6 Training and evaluation
+
+```bash
+# Pre-requisites (already done)
+python scripts/patch_kin_leg_odom_delta.py     # patches all kin.npz with leg_odom_delta
+bash scripts/run_vo_at_scale.py                # vo.npz must exist (already: 1,008 files)
+
+# Launch (IMU-only, default)
+GPU=1 bash scripts/launch_fusion_v3.sh
+
+# Launch (MARG ablation)
+GPU=1 bash scripts/launch_fusion_v3.sh --with-marg
+
+# Evaluate (after training)
+python fusion/evaluate.py --run-dir runs/fusion_v3 --device cuda
+python fusion/evaluate.py --run-dir runs/fusion_v3_marg --device cuda
+```
+
+Output: `runs/fusion_v3/{best_model.pt, test_results.json, per_traj_results.json}`.
+
+### 11.7 Expected outcome
+
+The hypothesis is that replacing the raw leg-velocity with an SE(3) delta — which gives the model both translation *and* rotation change from the kin branch — reduces the load on cross-modal attention and improves `ωx` (roll rate), which is the worst-performing axis in fusion_v2 (0.1272 rad/s). If the hypothesis holds, the SE(3) delta's `Δqx` channel (roll change ≈ gyro_x / 30) should correlate directly with `ωx` and provide a redundant, higher-SNR signal alongside the INS quaternion.
 
 ---
 

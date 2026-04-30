@@ -57,14 +57,15 @@ else
 fi
 
 echo "Output dir: ${RUN_DIR}"
-echo "Launching on CUDA_VISIBLE_DEVICES=0"
+GPU=${GPU:-1}
+echo "Launching on CUDA_VISIBLE_DEVICES=${GPU}"
 echo ""
 
 LOG_FILE="logs/fusion_v3$([ ${WITH_MARG} -eq 1 ] && echo _marg || echo '').log"
 PID_FILE="logs/fusion_v3$([ ${WITH_MARG} -eq 1 ] && echo _marg || echo '').pid"
 
 setsid nohup \
-  env CUDA_VISIBLE_DEVICES=0 python -u fusion/train.py \
+  env CUDA_VISIBLE_DEVICES=${GPU} python -u fusion/train.py \
     --output-dir "${RUN_DIR}" \
     --device cuda \
     --epochs 50 \
