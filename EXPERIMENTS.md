@@ -291,26 +291,56 @@ angular RMSE  0.1023 rad/s
 
 **Note:** unlike fusion_v1 where MARG improved over IMU-only, fusion_v2_marg is *worse* than fusion_v2 on every axis. The VO modality already provides orientation context (SE(3) deltas contain relative rotation), making the MARG's drift-free yaw redundant. IMU-only + VO is the better combination.
 
+### 3.6 fusion_v3 on the 208-trajectory test set (kin_v3 35D + IMU + VO)
+
+`fusion/evaluate.py` → `runs/fusion_v3/test_results.json`. 92,935 clips. Best checkpoint epoch 12 (val_loss 0.0191, early stopped at epoch 22).
+
+| axis | RMSE | P50 | P95 | units |
+|---|---:|---:|---:|---|
+| `vx` (body) | 0.0669 | 0.0339 | 0.1347 | m/s |
+| `vy` (body) | 0.0518 | 0.0252 | 0.1029 | m/s |
+| `vz` (body) | 0.0592 | 0.0277 | 0.1026 | m/s |
+| `ωx` (body) | 0.1420 | 0.0534 | 0.2320 | rad/s |
+| `ωy` (body) | 0.0986 | 0.0333 | 0.1301 | rad/s |
+| `ωz` (body) | 0.0792 | 0.0218 | 0.0927 | rad/s |
+
+```
+overall RMSE  0.0883
+linear  RMSE  0.0596 m/s
+angular RMSE  0.1098 rad/s
+```
+
+**Result: fusion_v3 is worse than fusion_v2 on every axis** (+19.8% overall). It is better than fusion_v1 (−5.4% overall) but not fusion_v1_marg.
+
+**Why it didn't work.** Replacing `v_body_legs (3D, m/s)` with `leg_odom_delta (7D SE(3) delta)` hurt for two reasons:
+1. **Wrong units for the task.** The model predicts velocity (m/s). `v_body_legs` is already in m/s — the kin branch provides a direct first-cut velocity estimate. `Δt = v * dt` scales this to metres per frame (≈0.03 m), producing a very-low-amplitude feature.
+2. **Near-identity quaternions.** `Δq` at 30 Hz is near `[0,0,0,1]` almost always — low variance, dominated by gyro noise. VO already provides rotation context via its own SE(3) deltas, making `Δq` redundant noise.
+
+The val curve was also noisy (0.019–0.026 range), consistent with the low-SNR features.
+
+**Conclusion:** keep `v_body_legs` in the kin branch. If SE(3) information from the legs is desired, *appending* `leg_odom_delta` as additional channels (38D kin) rather than replacing would be worth testing — but the VO modality likely already subsumes whatever rotational signal the legs can provide.
+
 ---
 
 ## 4. Summary tables
 
 ### 4.1 Each model on its own test split
 
-| | **Pre-Session-18 v1 best** | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** |
-|---|---:|---:|---:|---:|---:|---:|
-| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | factorized transformer | factorized transformer | factorized transformer | factorized transformer |
-| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 |
-| Visual input | RAFT-Stereo disparity | RGB | none | none | VO (DROID-SLAM) | VO (DROID-SLAM) |
-| INS variant | n/a | imu9 (raw) | IMU-only Madgwick | MARG stitched | IMU-only Madgwick | MARG stitched |
-| Train wall-clock | hours | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min |
-| Test trajectories | (different split) | 152 | 208 | 208 | 208 | 208 |
-| Test clips | — | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 |
-| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 |
-| Linear RMSE | 0.1384 m/s | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | **0.0483 m/s** | 0.0533 m/s |
-| Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s |
+| | **Pre-Session-18 v1 best** | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** | **fusion_v3** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | transformer | transformer | transformer | transformer | transformer |
+| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 | 455,558 |
+| Visual input | RAFT-Stereo disparity | RGB | none | none | VO (DROID-SLAM) | VO (DROID-SLAM) | VO (DROID-SLAM) |
+| Kin features | n/a | joints raw | 31D (v_body_legs) | 31D | 31D | 31D | 35D (leg_odom_delta) |
+| INS variant | n/a | imu9 (raw) | IMU-only | MARG | IMU-only | MARG | IMU-only |
+| Train wall-clock | hours | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min | ~48 min |
+| Test trajectories | (different split) | 152 | 208 | 208 | 208 | 208 | 208 |
+| Test clips | — | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 |
+| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 | 0.0883 |
+| Linear RMSE | 0.1384 m/s | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | **0.0483 m/s** | 0.0533 m/s | 0.0596 m/s |
+| Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s |
 
-**fusion_v2 is the current best on every metric.** Adding VO (DROID-SLAM SE(3) deltas) improves over the best fusion_v1 variant by −12.7 % overall, −17.5 % linear, −11.1 % angular — and beats Stage-2 by −42 % overall while using 73× fewer parameters.
+**fusion_v2 remains the best model on every metric.** fusion_v3 (SE(3) delta kinematics) performed worse than fusion_v2 — replacing `v_body_legs` with `leg_odom_delta` removes a direct velocity signal the model needs, and the near-identity quaternion deltas at 30 Hz add noise rather than information.
 
 **Caveat** — Stage-2's linear targets are world-frame vs body-frame for fusion. Angular is body-frame for both (strictly apples-to-apples). See §5 for detailed caveats.
 
@@ -344,6 +374,9 @@ angular RMSE  0.1023 rad/s
 | fusion_v2_marg ckpt | `~/projects/goodometry/runs/fusion_v2_marg/best_model.pt` |
 | fusion_v2_marg test | `~/projects/goodometry/runs/fusion_v2_marg/test_results.json` |
 | fusion_v2_marg per-traj | `~/projects/goodometry/runs/fusion_v2_marg/per_traj_results.json` |
+| fusion_v3 checkpoint | `~/projects/goodometry/runs/fusion_v3/best_model.pt` |
+| fusion_v3 test JSON | `~/projects/goodometry/runs/fusion_v3/test_results.json` |
+| fusion_v3 per-traj | `~/projects/goodometry/runs/fusion_v3/per_traj_results.json` |
 | Fair head-to-head | `~/projects/goodometry/runs/fair_head_to_head.json` |
 | Stride sweep | `~/projects/goodometry/pilot/stride_sweep_results.json` |
 | Training scripts | `~/projects/goodometry/fusion/train.py` and `~/projects/go2_research/run_cnn_rgb_stage2.sh` |
