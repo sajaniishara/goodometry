@@ -644,6 +644,91 @@ The hypothesis is that replacing the raw leg-velocity with an SE(3) delta — wh
 
 ---
 
+## 12. Architecture-comparison pipelines — fusion_tcn and fusion_mvit
+
+**Goal.** Test whether visual-encoder-style architectures (R3D-18 1D-temporal CNN, MViT-style multiscale transformer) bring anything to sensor fusion vs the existing factorized causal `FusionTransformer`. **No image inputs** — same kin + INS + VO modalities and the identical 650/150/208 stratified-by-terrain split as fusion_v2.
+
+### 12.1 Why these architectures
+
+- The `FusionTransformer` (fusion_v1/v2/v3) is intentionally compact (455K params). Useful question: does giving sensor fusion a *deeper* temporal model — with the architectural inductive biases that work for video — help, or has the small factorized transformer already saturated what's possible from these inputs?
+- "3D CNN for sensor fusion" only makes sense as 1D-temporal CNN — there is no spatial dim in the sensor data. The architectural idea ports cleanly: residual `BasicBlock1D` over time, channel-doubling between stages, stride-2 temporal downsampling.
+- "MViT for sensor fusion" ports the **multiscale pyramid** (progressive temporal-token reduction + channel expansion) onto the `(T, M)` modality-time token grid. Pooling attention itself isn't the bottleneck here, so it simplifies to mean-pool between stages.
+
+### 12.2 fusion_tcn — `FusionTCN`
+
+```python
+# fusion/temporal_cnn.py
+FusionTCN(
+    kin_in=31, ins_in=10, vo_in=7,
+    kin_emb=32, ins_emb=16, vo_emb=16,        # per-timestep MLP embedders
+    stage_channels=(64, 64, 128, 256),         # R3D-18 layout
+    blocks_per_stage=2,                        # 2 BasicBlock1D per stage
+    clip_len=40,
+)
+```
+
+- Input: kin (B, T=40, 31), ins (B, T, 10), vo (B, T, 7)
+- Per-modality per-timestep linear→GELU embedders (kin→32, ins→16, vo→16), channel-concat to 64
+- Stem: Conv1d(64→64, k=3, s=1) + BN + ReLU
+- 4 stages × 2 BasicBlock1D each. Stage 1 keeps T; stages 2/3/4 halve T (stride=2 on first block of stage). Channel progression 64 → 64 → 128 → 256.
+- Global avg pool over T → Linear(256, 6)
+- **1.02 M params** (~2.25× fusion_v2)
+
+### 12.3 fusion_mvit — `FusionMViT`
+
+```python
+# fusion/mvit.py
+FusionMViT(
+    kin_in=31, ins_in=10, vo_in=7,
+    stage_dims=(64, 96, 128),                  # progressive channel expansion
+    blocks_per_stage=(2, 2, 2),
+    n_heads=4, ffn_mult=2,
+    clip_len=40,
+)
+```
+
+- Input shape: same as fusion_v2 (kin, ins, vo)
+- Per-modality 2-layer MLP embedders to D=64, plus learned modality embedding + sinusoidal temporal positional encoding
+- Tokens stacked as (B, T, M=3, D)
+- 3 stages × 2 `FactorizedAttnBlock` (modal self-attn → temporal self-attn → FFN, pre-norm). Between stages: `StageDownsample` does mean-pool stride 2 over T pairs + linear projection to next stage's D
+- Temporal length: T = 40 → 20 → 10 across stages
+- **No causal mask** — single regression at the clip end (not per-timestep streaming)
+- Readout: mean over (T, M) → LayerNorm → Linear(128, 6)
+- **0.76 M params** (~1.67× fusion_v2)
+
+### 12.4 Training pipeline (shared)
+
+`fusion/train.py` is the same script used for fusion_v1/v2/v3. New `--arch {transformer, tcn, mvit}` flag selects the model class; everything else (dataset, loss, optimiser, modality dropout, scheduler, early stopping, logging, checkpointing) is byte-identical.
+
+```bash
+# fusion_tcn
+python fusion/train.py --arch tcn --use-vo \
+    --output-dir runs/fusion_tcn --epochs 50 --batch-size 128 --patience 10
+
+# fusion_mvit
+python fusion/train.py --arch mvit --use-vo \
+    --output-dir runs/fusion_mvit --epochs 50 --batch-size 128 --patience 10
+```
+
+### 12.5 Code map
+
+| File | What |
+|---|---|
+| `fusion/temporal_cnn.py` | `FusionTCN`, `BasicBlock1D` |
+| `fusion/mvit.py` | `FusionMViT`, `FactorizedAttnBlock`, `StageDownsample`, `sinusoidal_pe` |
+| `fusion/train.py` | added `--arch {transformer, tcn, mvit}` dispatch |
+| `scripts/launch_fusion_tcn.sh` | one-shot launcher (GPU 0, runs/fusion_tcn) |
+| `scripts/launch_fusion_mvit.sh` | one-shot launcher (GPU 0, runs/fusion_mvit) |
+| `scripts/watch_cnn_then_fusion.sh` | chained watcher: CNN RGB Stage-2 v2 → fusion_tcn → fusion_mvit on GPU 0 |
+
+### 12.6 Expected outcome
+
+- If fusion_tcn or fusion_mvit beats fusion_v2 by >2 % overall RMSE → the existing factorized transformer was capacity-limited and visual-encoder-style depth helps.
+- If they tie or underperform → fusion_v2's 455K params have already extracted what's available from these inputs, and the bottleneck is the modalities themselves (e.g. add depth, IMU sampling rate, or higher-resolution VO).
+- Both alternatives are roughly param-fair to fusion_v2 within a 2× factor; if results suggest a strong winner on params-vs-RMSE, can shrink `stage_dims`/`blocks_per_stage` for a strict size-matched re-run.
+
+---
+
 ## 10. Why this approach worked
 
 The end-to-end CNN/MViT pipeline was asking one network to *simultaneously* learn:

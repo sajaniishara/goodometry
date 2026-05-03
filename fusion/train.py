@@ -22,7 +22,9 @@ from fusion.dataset import (
     GoFusionDataset, split_trajectories, compute_norm_stats,
     KINEMATICS_DIM, KINEMATICS_V3_DIM, INS_DIM, VO_DIM, LABEL_DIM,
 )
-from fusion.model import FusionTransformer, param_count
+from fusion.model        import FusionTransformer, param_count
+from fusion.temporal_cnn import FusionTCN
+from fusion.mvit         import FusionMViT
 
 
 ROOT = "/mnt/data/go2_research_dataset_v2"
@@ -65,6 +67,10 @@ def parse_args():
     ap.add_argument("--use-kin-v3", action="store_true", default=False,
                     help="use 35-D kin features with leg_odom_delta SE(3) (fusion_v3); "
                          "requires patch_kin_leg_odom_delta.py to have been run")
+    ap.add_argument("--arch", choices=["transformer", "tcn", "mvit"], default="transformer",
+                    help="transformer = factorized FusionTransformer (fusion_v1/v2/v3); "
+                         "tcn = R3D-18-style 1D temporal CNN; "
+                         "mvit = multiscale factorized transformer (MViT-inspired)")
     return ap.parse_args()
 
 
@@ -136,14 +142,30 @@ def main():
                               num_workers=args.num_workers, pin_memory=(device.type == "cuda"))
 
     # --- model + optimizer ---
-    model = FusionTransformer(
-        kin_in=kin_dim, ins_in=INS_DIM,
-        vo_in=VO_DIM if args.use_vo else None,
-        d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
-        ffn_dim=args.ffn_dim, clip_len=args.clip_len,
-    ).to(device)
+    if args.arch == "transformer":
+        model = FusionTransformer(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if args.use_vo else None,
+            d_model=args.d_model, n_blocks=args.n_blocks, n_heads=args.n_heads,
+            ffn_dim=args.ffn_dim, clip_len=args.clip_len,
+        ).to(device)
+    elif args.arch == "tcn":
+        model = FusionTCN(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if args.use_vo else None,
+            clip_len=args.clip_len,
+        ).to(device)
+    elif args.arch == "mvit":
+        model = FusionMViT(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if args.use_vo else None,
+            n_heads=args.n_heads,
+            clip_len=args.clip_len,
+        ).to(device)
+    else:
+        raise ValueError(f"unknown --arch {args.arch}")
     n_params = param_count(model)
-    print(f"FusionTransformer params: {n_params:,}", flush=True)
+    print(f"{args.arch} params: {n_params:,}", flush=True)
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, factor=0.5, patience=3)

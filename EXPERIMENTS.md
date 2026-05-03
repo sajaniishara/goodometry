@@ -95,6 +95,57 @@ Identical to fusion_v1 except:
 
 Everything else (architecture, optimiser, split, loss, clip length, etc.) is byte-identical to fusion_v1.
 
+### 1.6 fusion_tcn (kin + INS + VO, R3D-18-style 1D temporal CNN)
+
+Architecture-comparison run added Session 25 — same data, split, loss, optimiser, and modality dropout as fusion_v2; **only the network architecture changes**.
+
+| Knob | Value |
+|---|---|
+| Architecture | `FusionTCN` — R3D-18-style 1D temporal CNN |
+| Modalities (M=3) | kinematics (31D→32), INS-IMU-only (10D→16), VO (7D→16); per-timestep MLP embedders, channel-concat to 64 |
+| Stages | stem Conv1d(3,1,1) → 4 stages of 2 `BasicBlock1D` each |
+| Stage channels | (64, 64, 128, 256) |
+| Temporal downsample | stride-2 between stages → T = 40 → 40 → 20 → 10 → 5 |
+| Readout | global avg pool over T → Linear(256, 6) |
+| Parameters | **1,023,798** |
+| Optimiser, scheduler, loss | identical to fusion_v2 (AdamW 1e-4 / wd 1e-4, ReduceLROnPlateau, weighted MSE [1,1,1,5,5,5]) |
+| Modality dropout | 10 % per-sample per modality (same as fusion_v2) |
+| Clip length / stride | 40 / 8 |
+| Batch size | 128 |
+| Patience | 10 epochs |
+| Train / val / test counts | 650 / 150 / 208, seed 42, **identical split to fusion_v2** |
+| Status | training pending (queued by `scripts/watch_cnn_then_fusion.sh` on GPU 0 after CNN RGB Stage-2 v2 finishes) |
+
+### 1.7 fusion_mvit (kin + INS + VO, MViT-style multiscale transformer)
+
+Architecture-comparison run added Session 25 — same data, split, loss, optimiser, and modality dropout as fusion_v2; **only the network architecture changes**.
+
+| Knob | Value |
+|---|---|
+| Architecture | `FusionMViT` — multiscale factorized transformer over `(B, T, M, D)` tokens |
+| Modalities (M=3) | kinematics, INS-IMU-only, VO; per-timestep 2-layer MLP embedders to D=64 |
+| Stages | 3 stages with progressive temporal pooling (avg-pool stride 2 over T pairs) and channel expansion |
+| Stage dims (D) | (64, 96, 128) |
+| Blocks per stage | (2, 2, 2) factorized modal+temporal attention |
+| Temporal length | T = 40 → 20 → 10 across stages |
+| Causal mask | **none** — single regression at clip end (not per-timestep streaming as in fusion_v1/v2) |
+| Heads / FFN multiplier | 4 / 2× |
+| Readout | mean over (T, M) → LayerNorm → Linear → 6 |
+| Parameters | **758,566** |
+| Optimiser, scheduler, loss | identical to fusion_v2 |
+| Modality dropout | 10 % per-sample per modality |
+| Clip length / stride | 40 / 8 |
+| Batch size | 128 |
+| Patience | 10 epochs |
+| Train / val / test counts | 650 / 150 / 208, seed 42, **identical split to fusion_v2** |
+| Status | training pending (queued by `scripts/watch_cnn_then_fusion.sh` after fusion_tcn finishes) |
+
+### 1.6 / 1.7 design notes
+
+- "3D CNN for sensor fusion" reinterpreted as 1D temporal CNN: there is no spatial dim in sensor data, so the R3D-18 idea reduces to `BasicBlock1D` over the time axis with channel-concat across modalities at the input.
+- "MViT for sensor fusion" reinterpreted as multiscale factorized transformer over `(T, M)` tokens — the MViT pyramid (progressive temporal-token reduction + channel expansion) is the directly portable idea; pooling attention itself simplifies to mean-pool between stages because keys/values are not the bottleneck at this scale.
+- Roughly param-fair to fusion_v2 (455K) within a 2× factor: TCN is 2.25×, MViT is 1.67×. If strict size-matching is needed for the thesis, `stage_dims` / `blocks_per_stage` can be reduced.
+
 ---
 
 ## 2. Train / val / test splits
@@ -341,6 +392,19 @@ The val curve was also noisy (0.019–0.026 range), consistent with the low-SNR 
 | Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s |
 
 **fusion_v2 remains the best model on every metric.** fusion_v3 (SE(3) delta kinematics) performed worse than fusion_v2 — replacing `v_body_legs` with `leg_odom_delta` removes a direct velocity signal the model needs, and the near-identity quaternion deltas at 30 Hz add noise rather than information.
+
+### 4.1.1 Architecture comparison (pending)
+
+Session 25 added two architecture-comparison runs that share the **identical 650/150/208 split, kin + INS + VO inputs, loss, optimiser, modality dropout, and clip config** as fusion_v2 — only the network changes. Numbers will be filled in when the queued runs complete (chained by `scripts/watch_cnn_then_fusion.sh` on GPU 0).
+
+| | **fusion_v2** | **fusion_tcn** | **fusion_mvit** |
+|---|---:|---:|---:|
+| Architecture | factorized causal transformer | R3D-18-style 1D temporal CNN | MViT-style multiscale transformer |
+| Parameters | 455,046 | 1,023,798 | 758,566 |
+| Inputs | kin 31D + IMU + VO | kin 31D + IMU + VO | kin 31D + IMU + VO |
+| Overall RMSE | 0.0737 | _pending_ | _pending_ |
+| Linear RMSE | 0.0483 m/s | _pending_ | _pending_ |
+| Angular RMSE | 0.0924 rad/s | _pending_ | _pending_ |
 
 **Caveat** — Stage-2's linear targets are world-frame vs body-frame for fusion. Angular is body-frame for both (strictly apples-to-apples). See §5 for detailed caveats.
 

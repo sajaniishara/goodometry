@@ -201,10 +201,61 @@ Decided to *edit* the kin branch input features (v3 flag on the same M=3 transfo
 
 ---
 
+## Session 25 — 2026-05-03 · fusion_tcn + fusion_mvit (visual-architecture-style sensor fusion)
+
+**Goal:** Compare the existing factorized-attention `FusionTransformer` against two alternative sensor-fusion architectures inspired by visual encoders — a 1D temporal CNN (R3D-18-style) and a multiscale transformer (MViT-style). No image inputs; same kin + INS + VO data and the exact same 650/150/208 split as fusion_v2.
+
+### `fusion/temporal_cnn.py` — `FusionTCN` (new)
+
+- R3D-18-style structure adapted to 1D sensor sequences: per-modality per-timestep linear embedders (kin→32, ins→16, vo→16), channel-concat to 64-D, then a stem Conv1d + 4 stages of `BasicBlock1D` residual blocks (Conv1d-BN-ReLU-Conv1d-BN + identity/projected residual).
+- Stage layout: `(64, 64, 128, 256)` channels, 2 blocks per stage, stride-2 temporal downsample between stages → T=40 → 40 → 20 → 10 → 5; global avg pool over T → linear head → 6.
+- **Params: 1,023,798.**
+
+### `fusion/mvit.py` — `FusionMViT` (new)
+
+- Multiscale factorized transformer over `(B, T, M, D)` tokens — M = number of modalities (3 with VO).
+- Per-modality embedders project to D=64 per timestep; modality embedding + sinusoidal temporal positional encoding.
+- 3 stages with progressive temporal pooling (stride-2 mean over T pairs) and channel expansion: dims `(64, 96, 128)`, 2 blocks per stage. Each block reuses the modal-then-temporal attention pattern from `fusion/model.py::FactorizedBlock`, but **without the causal mask** (single regression at clip end, not per-timestep streaming).
+- Readout: mean over (T, M) → LayerNorm → Linear → 6.
+- **Params: 758,566.**
+
+### `fusion/train.py` — `--arch` flag
+
+- New `--arch {transformer, tcn, mvit}` argument (default `transformer` keeps existing behavior).
+- `transformer` branch unchanged (forwards to `FusionTransformer` with d_model/n_blocks/n_heads/ffn_dim args).
+- `tcn` branch builds `FusionTCN(kin_in, ins_in, vo_in, clip_len)`.
+- `mvit` branch builds `FusionMViT(kin_in, ins_in, vo_in, n_heads, clip_len)`.
+- Param count log line updated to `f"{args.arch} params: {n_params:,}"`.
+
+### Launch scripts
+
+- `scripts/launch_fusion_tcn.sh` — runs `fusion/train.py --arch tcn --use-vo` with the same `--epochs 50 --batch-size 128 --patience 10` as `launch_fusion_v2.sh`. Output: `runs/fusion_tcn`.
+- `scripts/launch_fusion_mvit.sh` — same but `--arch mvit`. Output: `runs/fusion_mvit`.
+
+### `scripts/watch_cnn_then_fusion.sh` — chained watcher
+
+Polls every 60 s. When `pgrep -f "cnn_rgb_stage2_v2"` returns no PID, fires `launch_fusion_tcn.sh`, waits for its pidfile to exit, then fires `launch_fusion_mvit.sh`. All three on GPU 0. Currently running, PID 952028.
+
+### Earlier in the session — MViT runs killed
+
+- MViT RGB Stage-2 was launched on GPU 1 on 2026-05-01; the previous `watch_raft_then_mvit.sh` had auto-launched it after RAFT-Stereo finished.
+- Both MViT RGB and (auto-fired) MViT disparity Stage-2 were killed before completing epoch 1 — GPU 1 was needed for unitree RL training (`unitree_rl_lab/scripts/rsl_rl/train.py`, currently running there).
+- Both `runs/mvit_rgb_stage2/` and `runs/mvit_disparity_stage2/` only contain `norm_stats.json`. Both watchers (`watch_cnn_rgb_then_disparity.sh` PID 747512, `watch_mvit_rgb_then_disparity.sh` PID 747537) have exited.
+- CNN RGB Stage-2 v2 (GPU 0) still healthy: epoch 27/50, best val_loss 0.0221 at epoch 18, no_improve=9 — likely early-stops at epoch 28 (next ~4 hours).
+
+### Design notes
+
+- "3D CNN for sensor fusion" reinterpreted as 1D temporal CNN: there is no spatial dim in the sensor data, so the R3D-18 idea reduces to BasicBlock1D over the time axis with channel-concat across modalities at the input.
+- "MViT for sensor fusion" reinterpreted as multiscale factorized transformer over `(T, M)` tokens — the MViT pyramid (progressive token reduction + channel expansion) is the directly portable idea; pooling attention itself simplifies to mean-pool between stages here because keys/values are not the bottleneck.
+- Both architectures are roughly param-fair to fusion_v2 (455K) within a 2× factor; if strict size-matching is needed for the thesis, `stage_dims` / `blocks_per_stage` can be reduced.
+
+---
+
 ## Pending
 
-- **fusion_v3 evaluation** — once training finishes, run `python fusion/evaluate.py --run-dir runs/fusion_v3`; update EXPERIMENTS.md and Excel.
-- **fusion_v3_marg** — ablation: `GPU=1 bash scripts/launch_fusion_v3.sh --with-marg`. Run after fusion_v3 completes.
-- **Stage-2 CNN RGB v2** — still training on GPU 0 with corrected 650/149/208 split. ~8 days remaining from epoch 5.
-- **RAFT-Stereo disparity** — 879/1,008 done, resume when GPU 1 is free again: `bash scripts/launch_raft_resume.sh` (or re-run `precompute_disparity_h5.py` — it will skip completed trajectories).
+- **CNN RGB Stage-2 v2 evaluation** — once it stops (likely epoch 28), run `cnn3d/evaluate.py` and update EXPERIMENTS.md / Excel.
+- **fusion_tcn and fusion_mvit** — auto-fire on GPU 0 after CNN RGB Stage-2 v2 finishes (chained by `watch_cnn_then_fusion.sh`, PID 952028). Each ~1–2 hrs based on fusion_v2's 82 min wall-clock. Evaluate when done.
+- **MViT visual Stage-2 (RGB and disparity)** — both killed on 2026-05-01; need to be relaunched once GPU 1 is free again (currently on unitree RL training).
+- **CNN disparity Stage-2** — original plan dropped from the queue when fusion_tcn/mvit were prioritized for GPU 0. Revisit if needed.
+- **RAFT-Stereo disparity** — completed 1,008/1,008; `disparity_224.h5` available for any future visual-disparity Stage-2 run.
 - **Thesis graphs** — deferred; user to decide which figures to generate.
