@@ -251,11 +251,33 @@ Polls every 60 s. When `pgrep -f "cnn_rgb_stage2_v2"` returns no PID, fires `lau
 
 ---
 
+### Test results (added 2026-05-04)
+
+After CNN RGB Stage-2 v2 early-stopped at epoch 28 (best val_loss 0.0221 at epoch 18), the chained watcher fired both new architectures sequentially on GPU 0. Both completed and were evaluated on the 208-trajectory test set (92,935 clips):
+
+- **fusion_tcn:** test RMSE 0.0746 overall, **0.0429 m/s linear (best of all models)**, 0.0964 rad/s angular. Best at epoch 29, ~88 min wall-clock. Wins every linear axis (vx −17.8 %, vy −12.5 %, vz −1.3 % vs fusion_v2). All angular axes 1–12 % worse.
+- **fusion_mvit:** test RMSE 0.0772 overall, 0.0501 m/s linear, 0.0970 rad/s angular. Best at epoch 34, ~172 min wall-clock. Worse than fusion_v2 on every axis except `ωz` (where it still loses to fusion_v2).
+
+**Architectural conclusion.** fusion_v2 (factorised causal transformer, 455K params) is **not capacity-limited** — extra parameters from a 2.25× larger TCN buy a clear win on translation but don't unlock new accuracy on rotation. fusion_v2 still wins on overall RMSE and on every angular axis. For tasks that care about *linear* velocity specifically (e.g. position integration), fusion_tcn is the better choice. The MViT-style multiscale pyramid hurts at this scale: with T=40 / M=3 there is no token-count problem to solve, so mean-pool stride-2 between stages just discards information.
+
+`fusion/evaluate.py` was extended to dispatch on `args["arch"]`; previously it hard-instantiated `FusionTransformer`.
+
+EXPERIMENTS.md updated: §1.6 / §1.7 final stats, §3.7 / §3.8 detailed test breakdown, §4.1.1 head-to-head table with every per-axis number, §6 file pointers extended for new run dirs.
+
+### CNN disparity Stage-2 — started then stopped
+
+A separate CNN disparity Stage-2 run was started on GPU 0 around 2026-05-03 19:00 (`launch_cnn_disparity_stage2.sh`, PID 965107) and ran for ~17 hours (epoch 3/50, best val_loss 0.0476). User asked to stop it on 2026-05-04 — killed cleanly via SIGTERM on the process group. Checkpoints preserved at `runs/cnn_disparity_stage2/{best,last}_model.pt` for possible later resume.
+
+### CNN RGB Stage-2 v2 evaluation
+
+Launched `cnn3d/evaluate.py --checkpoint runs/cnn_rgb_stage2_v2/best_model.pt`. Will be reported here when complete.
+
+---
+
 ## Pending
 
-- **CNN RGB Stage-2 v2 evaluation** — once it stops (likely epoch 28), run `cnn3d/evaluate.py` and update EXPERIMENTS.md / Excel.
-- **fusion_tcn and fusion_mvit** — auto-fire on GPU 0 after CNN RGB Stage-2 v2 finishes (chained by `watch_cnn_then_fusion.sh`, PID 952028). Each ~1–2 hrs based on fusion_v2's 82 min wall-clock. Evaluate when done.
+- **CNN RGB Stage-2 v2 evaluation** — running now; update EXPERIMENTS.md/Excel when it finishes.
 - **MViT visual Stage-2 (RGB and disparity)** — both killed on 2026-05-01; need to be relaunched once GPU 1 is free again (currently on unitree RL training).
-- **CNN disparity Stage-2** — original plan dropped from the queue when fusion_tcn/mvit were prioritized for GPU 0. Revisit if needed.
-- **RAFT-Stereo disparity** — completed 1,008/1,008; `disparity_224.h5` available for any future visual-disparity Stage-2 run.
+- **CNN disparity Stage-2** — partial run preserved, user-stopped at epoch 3. Resume or rerun if needed.
+- **Excel updates** — `go2_model_results.xlsx` and `go2_experiment_summary.xlsx` need the fusion_tcn / fusion_mvit rows and Per-Trajectory sheets.
 - **Thesis graphs** — deferred; user to decide which figures to generate.

@@ -114,7 +114,8 @@ Architecture-comparison run added Session 25 — same data, split, loss, optimis
 | Batch size | 128 |
 | Patience | 10 epochs |
 | Train / val / test counts | 650 / 150 / 208, seed 42, **identical split to fusion_v2** |
-| Status | training pending (queued by `scripts/watch_cnn_then_fusion.sh` on GPU 0 after CNN RGB Stage-2 v2 finishes) |
+| Best val_loss | **0.0123 at epoch 29** |
+| Training wall-clock | ~88 min |
 
 ### 1.7 fusion_mvit (kin + INS + VO, MViT-style multiscale transformer)
 
@@ -138,7 +139,8 @@ Architecture-comparison run added Session 25 — same data, split, loss, optimis
 | Batch size | 128 |
 | Patience | 10 epochs |
 | Train / val / test counts | 650 / 150 / 208, seed 42, **identical split to fusion_v2** |
-| Status | training pending (queued by `scripts/watch_cnn_then_fusion.sh` after fusion_tcn finishes) |
+| Best val_loss | **0.0157 at epoch 34** |
+| Training wall-clock | ~172 min |
 
 ### 1.6 / 1.7 design notes
 
@@ -371,40 +373,95 @@ The val curve was also noisy (0.019–0.026 range), consistent with the low-SNR 
 
 **Conclusion:** keep `v_body_legs` in the kin branch. If SE(3) information from the legs is desired, *appending* `leg_odom_delta` as additional channels (38D kin) rather than replacing would be worth testing — but the VO modality likely already subsumes whatever rotational signal the legs can provide.
 
+### 3.7 fusion_tcn on the 208-trajectory test set (R3D-18-style 1D temporal CNN)
+
+`fusion/evaluate.py` → `runs/fusion_tcn/test_results.json`. 92,935 clips. Best checkpoint epoch 29.
+
+| axis | RMSE | P50 | P95 | units |
+|---|---:|---:|---:|---|
+| `vx` (body) | 0.0462 | 0.0229 | 0.0872 | m/s |
+| `vy` (body) | 0.0372 | 0.0187 | 0.0686 | m/s |
+| `vz` (body) | 0.0447 | 0.0228 | 0.0834 | m/s |
+| `ωx` (body) | 0.1285 | 0.0471 | 0.1944 | rad/s |
+| `ωy` (body) | 0.0826 | 0.0345 | 0.1299 | rad/s |
+| `ωz` (body) | 0.0676 | 0.0240 | 0.0915 | rad/s |
+
+```
+overall RMSE  0.0746
+linear  RMSE  0.0429 m/s    (body frame)  ← best of all models
+angular RMSE  0.0964 rad/s
+```
+
+**Result.** fusion_tcn matches fusion_v2 within +1.2 % on overall RMSE while posting the best Linear RMSE of any model trained on this dataset (−11.2 % vs fusion_v2). All three linear axes improve (vx −17.8 %, vy −12.5 %, vz −1.3 %). All three angular axes are slightly worse, by 1–12 %.
+
+### 3.8 fusion_mvit on the 208-trajectory test set (MViT-style multiscale transformer)
+
+`fusion/evaluate.py` → `runs/fusion_mvit/test_results.json`. 92,935 clips. Best checkpoint epoch 34.
+
+| axis | RMSE | P50 | P95 | units |
+|---|---:|---:|---:|---|
+| `vx` (body) | 0.0592 | 0.0303 | 0.1189 | m/s |
+| `vy` (body) | 0.0446 | 0.0235 | 0.0863 | m/s |
+| `vz` (body) | 0.0450 | 0.0235 | 0.0831 | m/s |
+| `ωx` (body) | 0.1325 | 0.0508 | 0.1929 | rad/s |
+| `ωy` (body) | 0.0753 | 0.0316 | 0.1153 | rad/s |
+| `ωz` (body) | 0.0707 | 0.0189 | 0.0780 | rad/s |
+
+```
+overall RMSE  0.0772
+linear  RMSE  0.0501 m/s
+angular RMSE  0.0970 rad/s
+```
+
+**Result.** fusion_mvit underperforms fusion_v2 by +4.7 % overall, with worse numbers on every axis except `ωz` (where it improves over fusion_tcn but not fusion_v2). The multi-scale pyramid (mean-pool stride-2 between stages) discards temporal information the factorised attention preserves; for a clip length of T=40 with M=3 modalities, there is no token-count problem to solve and pooling buys nothing.
+
 ---
 
 ## 4. Summary tables
 
 ### 4.1 Each model on its own test split
 
-| | **Pre-Session-18 v1 best** | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** | **fusion_v3** |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Architecture | MViT_V2_S + RAFT disp | R3D-18 + sensor CNN | transformer | transformer | transformer | transformer | transformer |
-| Parameters | ~35 M | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 | 455,558 |
-| Visual input | RAFT-Stereo disparity | RGB | none | none | VO (DROID-SLAM) | VO (DROID-SLAM) | VO (DROID-SLAM) |
-| Kin features | n/a | joints raw | 31D (v_body_legs) | 31D | 31D | 31D | 35D (leg_odom_delta) |
-| INS variant | n/a | imu9 (raw) | IMU-only | MARG | IMU-only | MARG | IMU-only |
-| Train wall-clock | hours | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min | ~48 min |
-| Test trajectories | (different split) | 152 | 208 | 208 | 208 | 208 | 208 |
-| Test clips | — | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 |
-| Overall RMSE | 0.2090 | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 | 0.0883 |
-| Linear RMSE | 0.1384 m/s | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | **0.0483 m/s** | 0.0533 m/s | 0.0596 m/s |
-| Angular RMSE | 0.2612 rad/s | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s |
+| | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** | **fusion_v3** | **fusion_tcn** | **fusion_mvit** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Architecture | R3D-18 + sensor CNN | transformer | transformer | transformer | transformer | transformer | TCN (R3D-18 1D) | multiscale ViT |
+| Parameters | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 | 455,558 | 1,023,798 | 758,566 |
+| Visual input | RGB | none | none | VO (DROID) | VO (DROID) | VO (DROID) | VO (DROID) | VO (DROID) |
+| Kin features | joints raw | 31D | 31D | 31D | 31D | 35D | 31D | 31D |
+| INS variant | imu9 raw | IMU-only | MARG | IMU-only | MARG | IMU-only | IMU-only | IMU-only |
+| Train wall-clock | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min | ~48 min | ~88 min | ~172 min |
+| Test trajectories | 152 (old split) | 208 | 208 | 208 | 208 | 208 | 208 | 208 |
+| Test clips | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 |
+| Overall RMSE | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 | 0.0883 | 0.0746 | 0.0772 |
+| Linear RMSE | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | 0.0483 m/s | 0.0533 m/s | 0.0596 m/s | **0.0429 m/s** | 0.0501 m/s |
+| Angular RMSE | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s | 0.0964 rad/s | 0.0970 rad/s |
 
-**fusion_v2 remains the best model on every metric.** fusion_v3 (SE(3) delta kinematics) performed worse than fusion_v2 — replacing `v_body_legs` with `leg_odom_delta` removes a direct velocity signal the model needs, and the near-identity quaternion deltas at 30 Hz add noise rather than information.
+**fusion_v2 still wins on overall and angular RMSE. fusion_tcn wins on linear RMSE.** The two architecture-comparison runs (fusion_tcn 1D temporal CNN, fusion_mvit multiscale transformer) confirm that the small factorised transformer (455K params) is not capacity-limited: a 2.25× larger TCN improves linear by 11 % but loses on angular, and the MViT-style pyramid is uniformly worse. fusion_v3 (SE(3) delta kinematics) is also worse than v2 — replacing `v_body_legs` (m/s) with `leg_odom_delta` (~0.03 m + near-identity Δq) removes a direct velocity signal and adds noise.
 
-### 4.1.1 Architecture comparison (pending)
+### 4.1.1 Architecture comparison — fusion_v2 vs fusion_tcn vs fusion_mvit
 
-Session 25 added two architecture-comparison runs that share the **identical 650/150/208 split, kin + INS + VO inputs, loss, optimiser, modality dropout, and clip config** as fusion_v2 — only the network changes. Numbers will be filled in when the queued runs complete (chained by `scripts/watch_cnn_then_fusion.sh` on GPU 0).
+All three runs use the **identical 650/150/208 stratified-by-terrain split (seed 42), kin + INS + VO inputs, loss, optimiser, modality dropout, and clip config** as fusion_v2 — only the network architecture changes (`--arch {transformer, tcn, mvit}` in `fusion/train.py`).
 
 | | **fusion_v2** | **fusion_tcn** | **fusion_mvit** |
 |---|---:|---:|---:|
 | Architecture | factorized causal transformer | R3D-18-style 1D temporal CNN | MViT-style multiscale transformer |
-| Parameters | 455,046 | 1,023,798 | 758,566 |
-| Inputs | kin 31D + IMU + VO | kin 31D + IMU + VO | kin 31D + IMU + VO |
-| Overall RMSE | 0.0737 | _pending_ | _pending_ |
-| Linear RMSE | 0.0483 m/s | _pending_ | _pending_ |
-| Angular RMSE | 0.0924 rad/s | _pending_ | _pending_ |
+| Parameters | 455,046 | 1,023,798 (2.25×) | 758,566 (1.67×) |
+| Best val_loss / epoch | 0.0126 / 31 | **0.0123 / 29** | 0.0157 / 34 |
+| Train wall-clock | ~82 min | ~88 min | ~172 min |
+| Overall RMSE | **0.0737** | 0.0746 | 0.0772 |
+| Linear RMSE | 0.0483 m/s | **0.0429 m/s** | 0.0501 m/s |
+| Angular RMSE | **0.0924 rad/s** | 0.0964 rad/s | 0.0970 rad/s |
+| `vx` RMSE | 0.0562 m/s | **0.0462 m/s** | 0.0592 m/s |
+| `vy` RMSE | 0.0425 m/s | **0.0372 m/s** | 0.0446 m/s |
+| `vz` RMSE | 0.0453 m/s | **0.0447 m/s** | 0.0450 m/s |
+| `ωx` RMSE | **0.1272 rad/s** | 0.1285 rad/s | 0.1325 rad/s |
+| `ωy` RMSE | **0.0737 rad/s** | 0.0826 rad/s | 0.0753 rad/s |
+| `ωz` RMSE | **0.0630 rad/s** | 0.0676 rad/s | 0.0707 rad/s |
+
+**fusion_v2 still wins overall and on every angular axis. fusion_tcn wins on every linear axis** (vx −17.8%, vy −12.5%, vz −1.3%) and posts the best Linear RMSE of any model trained on this dataset.
+
+**Reading the result.** fusion_tcn's **lower** val_loss but **slightly higher** test RMSE points to mild overfitting on the larger TCN; fusion_v2's compactness (455K vs 1.02M params) generalises slightly better despite the TCN's stronger temporal inductive bias. fusion_mvit is uniformly worse — pyramid tokens with mean-pooling between stages discards information the factorised modal+temporal attention preserves.
+
+**Conclusion.** The factorised causal transformer (fusion_v2) is **not capacity-limited** — extra parameters from a deeper temporal CNN buy a clear win on translation but don't unlock new accuracy on rotation. If the goal is to minimise *linear* velocity error specifically (e.g. for downstream position integration), fusion_tcn is the better choice. For balanced overall performance, fusion_v2 remains the recommended model.
 
 **Caveat** — Stage-2's linear targets are world-frame vs body-frame for fusion. Angular is body-frame for both (strictly apples-to-apples). See §5 for detailed caveats.
 
@@ -441,6 +498,14 @@ Session 25 added two architecture-comparison runs that share the **identical 650
 | fusion_v3 checkpoint | `~/projects/goodometry/runs/fusion_v3/best_model.pt` |
 | fusion_v3 test JSON | `~/projects/goodometry/runs/fusion_v3/test_results.json` |
 | fusion_v3 per-traj | `~/projects/goodometry/runs/fusion_v3/per_traj_results.json` |
+| fusion_tcn checkpoint | `~/projects/goodometry/runs/fusion_tcn/best_model.pt` |
+| fusion_tcn test JSON | `~/projects/goodometry/runs/fusion_tcn/test_results.json` |
+| fusion_tcn per-traj | `~/projects/goodometry/runs/fusion_tcn/per_traj_results.json` |
+| fusion_mvit checkpoint | `~/projects/goodometry/runs/fusion_mvit/best_model.pt` |
+| fusion_mvit test JSON | `~/projects/goodometry/runs/fusion_mvit/test_results.json` |
+| fusion_mvit per-traj | `~/projects/goodometry/runs/fusion_mvit/per_traj_results.json` |
+| Stage-2 v2 checkpoint | `~/projects/go2_research/runs/cnn_rgb_stage2_v2/best_model.pt` |
+| Stage-2 v2 eval (matched 650/149/208 split) | `~/projects/go2_research/runs/cnn_rgb_stage2_v2/eval/` |
 | Fair head-to-head | `~/projects/goodometry/runs/fair_head_to_head.json` |
 | Stride sweep | `~/projects/goodometry/pilot/stride_sweep_results.json` |
 | Training scripts | `~/projects/goodometry/fusion/train.py` and `~/projects/go2_research/run_cnn_rgb_stage2.sh` |

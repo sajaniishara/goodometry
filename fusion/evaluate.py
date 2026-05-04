@@ -20,8 +20,10 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, "/home/anyone/projects/goodometry")
-from fusion.dataset import GoFusionDataset, split_trajectories, KINEMATICS_DIM, KINEMATICS_V3_DIM, INS_DIM, VO_DIM
-from fusion.model import FusionTransformer
+from fusion.dataset       import GoFusionDataset, split_trajectories, KINEMATICS_DIM, KINEMATICS_V3_DIM, INS_DIM, VO_DIM
+from fusion.model         import FusionTransformer
+from fusion.temporal_cnn  import FusionTCN
+from fusion.mvit          import FusionMViT
 
 
 ROOT = "/mnt/data/go2_research_dataset_v2"
@@ -81,13 +83,31 @@ def main():
                               num_workers=args.num_workers,
                               pin_memory=(device.type == "cuda"))
 
-    model = FusionTransformer(
-        kin_in=kin_dim, ins_in=INS_DIM,
-        vo_in=VO_DIM if use_vo else None,
-        d_model=run_args["d_model"], n_blocks=run_args["n_blocks"],
-        n_heads=run_args["n_heads"], ffn_dim=run_args["ffn_dim"],
-        clip_len=run_args["clip_len"],
-    ).to(device)
+    arch = run_args.get("arch", "transformer")
+    if arch == "transformer":
+        model = FusionTransformer(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if use_vo else None,
+            d_model=run_args["d_model"], n_blocks=run_args["n_blocks"],
+            n_heads=run_args["n_heads"], ffn_dim=run_args["ffn_dim"],
+            clip_len=run_args["clip_len"],
+        ).to(device)
+    elif arch == "tcn":
+        model = FusionTCN(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if use_vo else None,
+            clip_len=run_args["clip_len"],
+        ).to(device)
+    elif arch == "mvit":
+        model = FusionMViT(
+            kin_in=kin_dim, ins_in=INS_DIM,
+            vo_in=VO_DIM if use_vo else None,
+            n_heads=run_args["n_heads"],
+            clip_len=run_args["clip_len"],
+        ).to(device)
+    else:
+        raise ValueError(f"unknown arch in run_args: {arch}")
+    print(f"arch: {arch}", flush=True)
     ckpt = torch.load(run_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     model.eval()
