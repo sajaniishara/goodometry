@@ -268,9 +268,35 @@ EXPERIMENTS.md updated: §1.6 / §1.7 final stats, §3.7 / §3.8 detailed test b
 
 A separate CNN disparity Stage-2 run was started on GPU 0 around 2026-05-03 19:00 (`launch_cnn_disparity_stage2.sh`, PID 965107) and ran for ~17 hours (epoch 3/50, best val_loss 0.0476). User asked to stop it on 2026-05-04 — killed cleanly via SIGTERM on the process group. Checkpoints preserved at `runs/cnn_disparity_stage2/{best,last}_model.pt` for possible later resume.
 
-### CNN RGB Stage-2 v2 evaluation
+### CNN RGB Stage-2 v2 evaluation — strict apples-to-apples vs fusion
 
-Launched `cnn3d/evaluate.py --checkpoint runs/cnn_rgb_stage2_v2/best_model.pt`. Will be reported here when complete.
+`cnn3d/evaluate.py` on the matched 650/149/208 split (93,767 test clips):
+
+```
+overall RMSE  0.1168
+linear  RMSE  0.0893     (world frame, training target)
+angular RMSE  0.1389 rad/s
+```
+
+Per-axis: vx 0.102, vy 0.103, vz 0.054, ωx 0.189, ωy 0.117, ωz 0.093 rad/s.
+
+**Direct vs fusion_v2** (now with identical 208 test trajectories):
+- Overall: 0.1168 → 0.0737 (**−36.9 %**)
+- Angular (apples-to-apples body frame): 0.1389 → 0.0924 (**−33.5 %**)
+- Params: 33.5 M → 455 K (**73× fewer**)
+- Train time: ~5 days → ~82 min (**88× faster**)
+
+This is the cleanest comparison the proposal needed and it confirms the pivot: at the same data and split, fusion_v2 wins decisively, with the gap larger on angular than overall (where the CNN benefits from world-frame linear targets that aren't strictly the same metric). The legacy `cnn_rgb_stage2/` (705/151/152 split, RMSE 0.1270) is now superseded by `cnn_rgb_stage2_v2/`.
+
+### Single-modality baselines (added in this commit)
+
+`scripts/single_modality_baselines.py` runs each preprocessing arm directly as the velocity prediction (no learning). Key result:
+
+- kin only: 0.2464 m/s linear RMSE — fusion_v2 is **5.1× better**
+- IMU only (gyro): 0.2944 rad/s angular RMSE — fusion_v2 is **3.2× better**
+- VO only: scale ~2× off (DROID + stride-3 interp), unusable per-axis without cam-body extrinsic; speed-magnitude RMSE 1.71 m/s
+
+The fusion model isn't a marginal refinement — it's a **5×/3×** error reduction over the best single modality. EXPERIMENTS.md §4.2 has the full per-axis table and reading guide.
 
 ---
 

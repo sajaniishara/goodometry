@@ -6,9 +6,41 @@ Companion to `PIPELINE.md`. Every model trained, every test evaluation, and the 
 
 ## 1. Models trained
 
-### 1.1 Stage-2 CNN RGB (baseline, end-to-end)
+### 1.1 Stage-2 CNN RGB v2 (baseline, end-to-end, matched 650/149/208 split)
 
-The latest `go2_research/runs/cnn_rgb_stage2/` checkpoint. Trained Sessions 18–21 of `CHANGES.md`.
+`go2_research/runs/cnn_rgb_stage2_v2/` — re-trained with the same 650/149/208 stratified split as the fusion models for a strict apples-to-apples comparison. Old `cnn_rgb_stage2/` (705/151/152, RMSE 0.1270) is preserved but superseded.
+
+| Knob | Value |
+|---|---|
+| Architecture | `VideoResNet18Fused` (R3D-18 + 1D-CNN sensor branch) |
+| Visual input | RGB left camera, T = 8 frames at 224×224 |
+| Sensor input | `imu9` + joints |
+| Parameters | 33,485,894 |
+| Best val_loss | 0.0221 at epoch 18 |
+| Early-stopped | epoch 28 (patience 10) |
+| Training wall-clock | ~5 days (28 epochs × ~4.2 hrs/epoch on RTX 5060 Ti) |
+| Test set | **208 trajectories, 93,767 clips** (matched to fusion_v2) |
+
+**Test results (body-frame angular, world-frame linear targets per training):**
+
+| axis | RMSE | MAE | Median | P95 |
+|---|---:|---:|---:|---:|
+| `vx` | 0.1020 | 0.0704 | 0.0486 | 0.2118 |
+| `vy` | 0.1031 | 0.0706 | 0.0474 | 0.2198 |
+| `vz` | 0.0537 | 0.0362 | 0.0257 | 0.1047 |
+| `roll_rate` | 0.1887 | 0.1128 | 0.0769 | 0.3106 |
+| `pitch_rate` | 0.1171 | 0.0775 | 0.0591 | 0.1994 |
+| `yaw_rate` | 0.0928 | 0.0586 | 0.0437 | 0.1529 |
+
+```
+overall RMSE  0.1168
+linear  RMSE  0.0893     (world frame)
+angular RMSE  0.1389 rad/s
+```
+
+### 1.1.legacy Stage-2 CNN RGB (old 705/151/152 split)
+
+The legacy `go2_research/runs/cnn_rgb_stage2/` checkpoint. Trained Sessions 18–21 of `CHANGES.md`.
 
 | Knob | Value |
 |---|---|
@@ -421,7 +453,7 @@ angular RMSE  0.0970 rad/s
 
 ### 4.1 Each model on its own test split
 
-| | **Stage-2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** | **fusion_v3** | **fusion_tcn** | **fusion_mvit** |
+| | **Stage-2 v2** | **fusion_v1** | **fusion_v1_marg** | **fusion_v2** | **fusion_v2_marg** | **fusion_v3** | **fusion_tcn** | **fusion_mvit** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Architecture | R3D-18 + sensor CNN | transformer | transformer | transformer | transformer | transformer | TCN (R3D-18 1D) | multiscale ViT |
 | Parameters | 33,485,894 | **437,382** | 437,382 | 455,046 | 455,046 | 455,558 | 1,023,798 | 758,566 |
@@ -429,11 +461,13 @@ angular RMSE  0.0970 rad/s
 | Kin features | joints raw | 31D | 31D | 31D | 31D | 35D | 31D | 31D |
 | INS variant | imu9 raw | IMU-only | MARG | IMU-only | MARG | IMU-only | IMU-only | IMU-only |
 | Train wall-clock | ~5 days | ~37 min | ~38 min | ~82 min | ~60 min | ~48 min | ~88 min | ~172 min |
-| Test trajectories | 152 (old split) | 208 | 208 | 208 | 208 | 208 | 208 | 208 |
-| Test clips | 68,557 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 |
-| Overall RMSE | 0.1270 | 0.0933 | 0.0844 | **0.0737** | 0.0816 | 0.0883 | 0.0746 | 0.0772 |
-| Linear RMSE | 0.0902 m/s | 0.0637 m/s | 0.0586 m/s | 0.0483 m/s | 0.0533 m/s | 0.0596 m/s | **0.0429 m/s** | 0.0501 m/s |
-| Angular RMSE | 0.1553 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s | 0.0964 rad/s | 0.0970 rad/s |
+| Test trajectories | **208** | 208 | 208 | 208 | 208 | 208 | 208 | 208 |
+| Test clips | 93,767 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 | 92,935 |
+| Overall RMSE | 0.1168 | 0.0933 | 0.0844 | **0.0737** | 0.0816 | 0.0883 | 0.0746 | 0.0772 |
+| Linear RMSE | 0.0893 m/s † | 0.0637 m/s | 0.0586 m/s | 0.0483 m/s | 0.0533 m/s | 0.0596 m/s | **0.0429 m/s** | 0.0501 m/s |
+| Angular RMSE | 0.1389 rad/s | 0.1156 rad/s | 0.1039 rad/s | **0.0924 rad/s** | 0.1023 rad/s | 0.1098 rad/s | 0.0964 rad/s | 0.0970 rad/s |
+
+† Stage-2 v2's linear is in **world frame** (its training target); fusion linear is body-frame. Angular is body-frame for both — strictly apples-to-apples. **Stage-2 v2 → fusion_v2:** −36.9 % overall, −33.5 % angular.
 
 **fusion_v2 still wins on overall and angular RMSE. fusion_tcn wins on linear RMSE.** The two architecture-comparison runs (fusion_tcn 1D temporal CNN, fusion_mvit multiscale transformer) confirm that the small factorised transformer (455K params) is not capacity-limited: a 2.25× larger TCN improves linear by 11 % but loses on angular, and the MViT-style pyramid is uniformly worse. fusion_v3 (SE(3) delta kinematics) is also worse than v2 — replacing `v_body_legs` (m/s) with `leg_odom_delta` (~0.03 m + near-identity Δq) removes a direct velocity signal and adds noise.
 

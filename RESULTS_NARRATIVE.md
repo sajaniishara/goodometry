@@ -44,13 +44,13 @@ While bringing the visual models to the proposal numbers, three data bugs were f
 After fixing all three, the **fully cleaned end-to-end CNN RGB** (33.5 M params, 5 days training) topped out at:
 
 ```
-Stage-2 CNN RGB (cleaned)
-  overall RMSE  0.1270
-  linear  RMSE  0.0902 m/s
-  angular RMSE  0.1553 rad/s
+Stage-2 CNN RGB v2 (cleaned, matched 650/149/208 split)
+  overall RMSE  0.1168
+  linear  RMSE  0.0893     (world frame, training target)
+  angular RMSE  0.1389 rad/s
 ```
 
-This is the true ceiling of the proposed approach on this dataset. **The ceiling was not high enough.** The downstream goal — usable body-frame velocity for closed-loop control on the real robot — needs single-digit centimetre-per-second linear errors and well under 0.10 rad/s on body roll/pitch. Stage-2 missed both by a factor of 2–3×.
+(The legacy 705/151/152-split run reported RMSE 0.1270 — `cnn_rgb_stage2_v2/` retrains on the matched split for a strict apples-to-apples comparison with fusion.) This is the true ceiling of the proposed approach on this dataset. **The ceiling was not high enough.** The downstream goal — usable body-frame velocity for closed-loop control on the real robot — needs single-digit centimetre-per-second linear errors and well under 0.10 rad/s on body roll/pitch. Stage-2 missed both by a factor of 2–3×.
 
 ### 2.3 Compute and iteration economics
 
@@ -87,7 +87,17 @@ fusion_v1
   angular RMSE  0.1156 rad/s (Stage-2 was 0.1553 — −25.6%)
 ```
 
-A 77× smaller model, 200× faster training, and ~26 % lower RMSE on every metric. The pivot answered the question: **the bottleneck was never visual capacity; it was that the model had been wasting capacity reinventing FK, IMU integration, and SLAM.**
+A 77× smaller model, 200× faster training, and ~20 % lower RMSE on every metric vs the matched-split CNN RGB v2. The pivot answered the question: **the bottleneck was never visual capacity; it was that the model had been wasting capacity reinventing FK, IMU integration, and SLAM.**
+
+### 3.2 Sanity-check: what does each preprocessing arm deliver on its own?
+
+A natural question after the pivot: are the preprocessing arms themselves already accurate enough to use directly? Or are we just measuring the network's ability to clean up bad inputs? The single-modality baselines (`scripts/single_modality_baselines.py`, full numbers in `EXPERIMENTS.md` §4.2) answer this:
+
+- **kin alone** (`v_body_legs` from the stance-foot constraint) gives a linear-velocity RMSE of **0.2464 m/s** — five times worse than fusion. The stance-foot constraint at 30 Hz amplifies finite-difference noise; leg compression under the ±5° body roll oscillation injects systematic error on `vy` and `vz`.
+- **IMU alone** (`gyro_body` raw) gives an angular RMSE of **0.2944 rad/s**, dominated by `ωx = 0.466` rad/s — the gyro reads the 2 Hz trot oscillation faithfully, but the body-frame angular-velocity label has been smoothed.
+- **VO alone** is the most cautionary case. DROID-SLAM camera-to-world poses are in optical convention with an unknown camera-to-body extrinsic; per-axis RMSE under a "camera ≈ body" assumption is uninterpretable (5.6 rad/s on `ωx`). Even after stripping frame, the speed-magnitude RMSE is **1.71 m/s** — DROID has a ~2× scale bias on this dataset (mean ratio of VO speed to GT body speed ≈ 1.95), almost certainly stride-3 interpolation × stereo-scale issues.
+
+None of the three arms is usable on its own. **Fusion is what makes the system viable** — it brings linear RMSE down 5.1× (kin → fusion_v2) and angular RMSE down 3.2× (IMU → fusion_v2), and uses VO as a directional signal without trusting its scale.
 
 ---
 
