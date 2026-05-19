@@ -49,12 +49,11 @@ plt.rcParams.update({
 
 # Consistent colors per model — used across every figure
 COLORS = {
-    "Stage-2 v2":     "#888888",
+    "Stage-2 CNN_RGB":     "#888888",
     "fusion_v1":      "#9ecae1",
     "fusion_v1_marg": "#6baed6",
     "fusion_v2":      "#08519c",   # best — dark blue
     "fusion_v2_marg": "#2171b5",
-    "fusion_v3":      "#fd8d3c",   # warning — orange
     "fusion_tcn":     "#41ab5d",   # green
     "fusion_mvit":    "#807dba",   # purple
     "kin only":       "#bcbddc",
@@ -81,7 +80,7 @@ def load_train_log(run):
 
 
 fusion_runs = ["fusion_v1", "fusion_v1_marg", "fusion_v2",
-               "fusion_v2_marg", "fusion_v3", "fusion_tcn", "fusion_mvit"]
+               "fusion_v2_marg", "fusion_tcn", "fusion_mvit"]
 
 tests   = {r: load_test(r)     for r in fusion_runs}
 # per_traj_results.json was added later — fusion_v1/fusion_v1_marg don't have it
@@ -90,7 +89,7 @@ per_tj  = {r: load_per_traj(r) for r in fusion_runs
 logs    = {r: load_train_log(r) for r in fusion_runs}
 basel   = json.load(open(RUNS / "single_modality_baselines" / "results.json"))
 
-# Stage-2 v2 — manually keyed (no JSON)
+# Stage-2 CNN_RGB — manually keyed (no JSON)
 STAGE2_V2 = {
     "rmse_overall": 0.1168,
     "rmse_lin":     0.0893,
@@ -102,48 +101,46 @@ STAGE2_V2 = {
 }
 
 PARAMS = {
-    "Stage-2 v2":     33485894,
+    "Stage-2 CNN_RGB":     33485894,
     "fusion_v1":      437382,
     "fusion_v1_marg": 437382,
     "fusion_v2":      455046,
     "fusion_v2_marg": 455046,
-    "fusion_v3":      455558,
     "fusion_tcn":     1023798,
     "fusion_mvit":    758566,
 }
 
 TRAIN_MIN = {
-    "Stage-2 v2":     5 * 24 * 60,
+    "Stage-2 CNN_RGB":     5 * 24 * 60,
     "fusion_v1":      37,
     "fusion_v1_marg": 38,
     "fusion_v2":      82,
     "fusion_v2_marg": 60,
-    "fusion_v3":      48,
     "fusion_tcn":     88,
     "fusion_mvit":    172,
 }
 
 
 def overall(model):
-    if model == "Stage-2 v2":
+    if model == "Stage-2 CNN_RGB":
         return STAGE2_V2["rmse_overall"]
     return tests[model]["rmse_overall"]
 
 
 def lin(model):
-    if model == "Stage-2 v2":
+    if model == "Stage-2 CNN_RGB":
         return STAGE2_V2["rmse_lin"]
     return tests[model]["rmse_lin"]
 
 
 def ang(model):
-    if model == "Stage-2 v2":
+    if model == "Stage-2 CNN_RGB":
         return STAGE2_V2["rmse_ang"]
     return tests[model]["rmse_ang"]
 
 
 def per_axis(model):
-    if model == "Stage-2 v2":
+    if model == "Stage-2 CNN_RGB":
         return STAGE2_V2["rmse_per_axis"]
     return tests[model]["rmse_per_axis"]
 
@@ -152,8 +149,8 @@ def per_axis(model):
 # Figure 1 — overall RMSE bar chart, all models
 # ===========================================================================
 def fig1_overall_rmse():
-    models = ["Stage-2 v2", "fusion_v1", "fusion_v1_marg",
-              "fusion_v3", "fusion_mvit", "fusion_tcn",
+    models = ["Stage-2 CNN_RGB", "fusion_v1", "fusion_v1_marg",
+              "fusion_mvit", "fusion_tcn",
               "fusion_v2_marg", "fusion_v2"]
     # Sort by overall RMSE ascending so best is at the top
     models = sorted(models, key=overall)
@@ -185,7 +182,7 @@ def fig1_overall_rmse():
 # Figure 2 — per-axis RMSE grouped bars (key models)
 # ===========================================================================
 def fig2_per_axis_rmse():
-    models = ["Stage-2 v2", "fusion_v1", "fusion_v1_marg", "fusion_v2",
+    models = ["Stage-2 CNN_RGB", "fusion_v1", "fusion_v1_marg", "fusion_v2",
               "fusion_tcn", "fusion_mvit"]
     n_models = len(models)
     n_axes   = 6
@@ -310,12 +307,11 @@ def fig5_param_efficiency():
 
     # Pixel-offset annotations (works correctly under log scale)
     offsets = {
-        "Stage-2 v2":     (-12, -10, "right"),
+        "Stage-2 CNN_RGB":     (-12, -10, "right"),
         "fusion_v1":      (10, 4, "left"),
         "fusion_v1_marg": (10, 4, "left"),
         "fusion_v2":      (10, -10, "left"),
         "fusion_v2_marg": (10, 4, "left"),
-        "fusion_v3":      (10, 4, "left"),
         "fusion_tcn":     (10, -10, "left"),
         "fusion_mvit":    (10, 4, "left"),
     }
@@ -359,7 +355,6 @@ def fig6_val_loss_curves():
         "fusion_v1_marg": ("--", 1.4),
         "fusion_v2":      ("-",  2.0),
         "fusion_v2_marg": ("-",  1.4),
-        "fusion_v3":      ("-",  1.4),
         "fusion_tcn":     ("-",  1.8),
         "fusion_mvit":    ("-",  1.6),
     }
@@ -392,7 +387,7 @@ def fig6_val_loss_curves():
 # ===========================================================================
 def fig7_per_traj_cdf():
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
-    for m in ["fusion_v2", "fusion_v3", "fusion_tcn", "fusion_mvit"]:
+    for m in ["fusion_v2", "fusion_tcn", "fusion_mvit"]:
         if m not in per_tj:
             continue
         rs = sorted(t["rmse_overall"] for t in per_tj[m])

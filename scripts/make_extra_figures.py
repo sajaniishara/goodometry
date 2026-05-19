@@ -44,12 +44,11 @@ plt.rcParams.update({
 })
 
 COLORS = {
-    "Stage-2 v2":     "#888888",
+    "Stage-2 CNN_RGB":     "#888888",
     "fusion_v1":      "#9ecae1",
     "fusion_v1_marg": "#6baed6",
     "fusion_v2":      "#08519c",
     "fusion_v2_marg": "#2171b5",
-    "fusion_v3":      "#fd8d3c",
     "fusion_tcn":     "#41ab5d",
     "fusion_mvit":    "#807dba",
 }
@@ -147,11 +146,10 @@ def fig_architecture():
 # ===========================================================================
 def fig_wallclock_rmse():
     data = [
-        ("Stage-2 v2",     5*24*60, 0.1168),
+        ("Stage-2 CNN_RGB",     5*24*60, 0.1168),
         ("fusion_v1",      37,      0.0933),
         ("fusion_v1_marg", 38,      0.0844),
         ("fusion_v2_marg", 60,      0.0816),
-        ("fusion_v3",      48,      0.0883),
         ("fusion_v2",      82,      0.0737),
         ("fusion_tcn",     88,      0.0746),
         ("fusion_mvit",    172,     0.0772),
@@ -161,11 +159,10 @@ def fig_wallclock_rmse():
         ax.scatter(t, r, color=COLORS[name], edgecolor="black",
                    s=160, linewidths=0.7, zorder=3)
     offsets = {
-        "Stage-2 v2":     (-12, -10, "right"),
+        "Stage-2 CNN_RGB":     (-12, -10, "right"),
         "fusion_v1":      (10, -8, "left"),
         "fusion_v1_marg": (10, 4, "left"),
         "fusion_v2_marg": (10, -8, "left"),
-        "fusion_v3":      (-12, -10, "right"),
         "fusion_v2":      (12, 4, "left"),
         "fusion_tcn":     (10, -10, "left"),
         "fusion_mvit":    (10, 4, "left"),
