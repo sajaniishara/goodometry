@@ -164,6 +164,12 @@ def main():
         json.dump(result, f, indent=2)
     print(f"\nSaved {run_dir / 'test_results.json'}")
 
+    # Dump the per-clip ω_x (roll) error for the frame-level error-distribution
+    # figure (index 3 = ω_x). Signed error; downstream plots abs() as a CDF.
+    # Zero extra compute — `err` is already materialised above.
+    np.save(run_dir / "per_clip_wx_err.npy", err[:, 3].astype(np.float32))
+    print(f"Saved {run_dir / 'per_clip_wx_err.npy'} ({len(err):,} clips)")
+
     # Per-trajectory breakdown (clips are in order — shuffle=False).
     traj_preds: dict[str, list] = {}
     traj_tgts:  dict[str, list] = {}
